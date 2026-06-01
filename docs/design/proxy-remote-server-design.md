@@ -661,17 +661,33 @@ public class DispatchInvoker implements Invoker {
     }
 
     private Response handleConnect(Invocation invocation) {
-        // Phase 2: 建立到目标服务器的 Outbound 连接
+        // 隧道建立：客户端告知目标 host:port，服务端在此时机异步发起 Outbound 连接
+        // Phase 2 实现流程：
+        //   1. 从 invocation 中取出 targetHost:targetPort
+        //   2. 通过 Outbound Bootstrap 异步建连（DNS + TCP + 可能的 TLS）
+        //   3. 将连接 Future/引用注册到 streamId → OutboundSession 映射
+        //   4. 立即返回 OK（通知客户端隧道就绪，可以开始发送 DATA）
+        // 利用 CONNECT 与第一个 DATA 之间的时间窗口完成建连，减少用户首包延迟
         return Response.ok();
     }
 
     private Response handleData(Invocation invocation) {
-        // Phase 2: 转发数据到目标服务器
+        // 数据面核心路径：用户的实际流量到达
+        // Phase 2 实现流程：
+        //   1. 根据 streamId 从映射中取出 OutboundSession
+        //   2. 如果 Outbound 连接已 ready → 直接转发用户数据到目标站点
+        //      如果连接尚未建好 → 等待连接就绪（或缓冲排队）后再发
+        //   3. 异步等待目标站点响应
+        //   4. 将响应数据通过 CompletableFuture 返回，由上层通过 Stream Channel 推回客户端
         return Response.ok(invocation.getData());
     }
 
     private Response handleDisconnect(Invocation invocation) {
-        // Phase 2: 关闭 Outbound 连接，清理资源
+        // 会话断开：客户端通知隧道关闭
+        // Phase 2 实现流程：
+        //   1. 根据 streamId 从映射中移除 OutboundSession
+        //   2. 关闭到目标站点的 Outbound 连接（或归还连接池）
+        //   3. 释放该会话占用的所有资源（缓冲区、计数器等）
         return Response.ok();
     }
 }
