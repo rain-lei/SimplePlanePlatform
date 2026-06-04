@@ -44,17 +44,8 @@ public class HeaderExchanger implements Exchanger {
 
     @Override
     public ExchangeClient connect(URL url) {
-        return connect(url, null);
-    }
-
-    @Override
-    public ExchangeClient connect(URL url, Object pushCallback) {
-        // 1. 创建 ExchangeHandler（响应处理器 + 可选的推送处理器）
-        ServerPushHandler pushHandler = null;
-        if (pushCallback instanceof ServerPushHandler) {
-            pushHandler = (ServerPushHandler) pushCallback;
-        }
-        ExchangeHandler handler = new ExchangeHandler(pushHandler);
+        // 1. 创建 ExchangeHandler（响应处理器）
+        ExchangeHandler handler = new ExchangeHandler();
 
         // 2. 通过 SPI 加载 Transporter，建连时把 handler 塞进去
         Transporter transporter = ExtensionLoader.getLoader(Transporter.class).getDefaultExtension();

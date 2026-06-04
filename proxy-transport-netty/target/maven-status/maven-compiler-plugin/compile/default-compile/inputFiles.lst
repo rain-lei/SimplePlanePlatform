@@ -1,6 +1,7 @@
 /Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/NettyClient.java
 /Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/NettyServer.java
 /Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/NettyTransporter.java
+/Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/StreamPipelineCustomizer.java
 /Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/codec/ProxyCodec.java
 /Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/handler/CipherDecodeHandler.java
 /Users/zhanghonghao/Desktop/SimplePlanePlatform/proxy-transport-netty/src/main/java/com/proxy/transport/netty/handler/CipherEncodeHandler.java

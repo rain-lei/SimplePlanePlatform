@@ -5,6 +5,7 @@ import com.proxy.common.crypto.CipherConfig;
 import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
 import com.proxy.common.transport.MessageHandler;
+import com.proxy.transport.netty.StreamPipelineCustomizer;
 import com.proxy.transport.netty.handler.CipherDecodeHandler;
 import com.proxy.transport.netty.handler.CipherEncodeHandler;
 import com.proxy.transport.netty.handler.ClientMessageHandler;
@@ -97,6 +98,7 @@ public class ConnectionPool {
     private final AtomicInteger waitingCount = new AtomicInteger(0);
 
     private final MessageHandler messageHandler;
+    private final List<StreamPipelineCustomizer> pipelineCustomizers;
     private volatile SslContext sslContext;
 
     public ConnectionPool(URL url, MessageHandler handler) {
@@ -107,11 +109,31 @@ public class ConnectionPool {
         this.workerGroup = new NioEventLoopGroup(
                 url.getParameter("ioThreads", Runtime.getRuntime().availableProcessors()));
 
+        // 通过 SPI 加载所有 StreamPipelineCustomizer 实现
+        this.pipelineCustomizers = loadPipelineCustomizers();
+
         if (config.isSslEnabled()) {
             initSslContext();
         }
 
         this.bootstrap = initBootstrap();
+    }
+
+    /**
+     * 通过 SPI 加载所有已注册的 StreamPipelineCustomizer
+     */
+    private List<StreamPipelineCustomizer> loadPipelineCustomizers() {
+        try {
+            List<StreamPipelineCustomizer> customizers =
+                    ExtensionLoader.getLoader(StreamPipelineCustomizer.class).getActivateExtensions("");
+            if (!customizers.isEmpty()) {
+                log.info("Loaded {} StreamPipelineCustomizer(s)", customizers.size());
+            }
+            return customizers;
+        } catch (Exception e) {
+            log.debug("No StreamPipelineCustomizer found via SPI (this is normal for server-side)");
+            return java.util.Collections.emptyList();
+        }
     }
 
     private void initSslContext() {
@@ -333,6 +355,11 @@ public class ConnectionPool {
                                 0, TimeUnit.SECONDS));
                 ch.pipeline().addLast("heartbeat", new HeartbeatHandler());
                 ch.pipeline().addLast("handler", new ClientMessageHandler(messageHandler));
+
+                // 应用所有 SPI 注册的 Pipeline 定制器（如 push 消息路由）
+                for (StreamPipelineCustomizer customizer : pipelineCustomizers) {
+                    customizer.customize(ch.pipeline());
+                }
             }
         });
 

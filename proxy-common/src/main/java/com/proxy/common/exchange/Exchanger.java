@@ -50,21 +50,6 @@ public interface Exchanger {
     ExchangeClient connect(URL url);
 
     /**
-     * 创建一个到远程服务器的 ExchangeClient，并注册服务端推送消息的回调
-     * <p>
-     * 与 {@link #connect(URL)} 相同，但额外支持处理远程服务端主动推送的消息
-     * （requestId=0 的 DATA，如目标网站返回的数据）。
-     * </p>
-     *
-     * @param url              远程服务器地址及参数
-     * @param pushCallback     服务端推送消息的回调处理器（可选），null 时等同于 connect(url)
-     * @return ExchangeClient 实例
-     */
-    default ExchangeClient connect(URL url, Object pushCallback) {
-        return connect(url);
-    }
-
-    /**
      * 绑定本地端口，创建并启动 ExchangeServer
      * <p>
      * 与 {@link #connect(URL)} 对称：connect 创建客户端，bind 创建服务端。

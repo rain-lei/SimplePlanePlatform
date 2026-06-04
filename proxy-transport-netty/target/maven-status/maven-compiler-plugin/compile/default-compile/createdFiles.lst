@@ -1,5 +1,6 @@
 com/proxy/transport/netty/handler/CipherEncodeHandler.class
 com/proxy/transport/netty/pool/ConnectionPool$1.class
+com/proxy/transport/netty/StreamPipelineCustomizer.class
 com/proxy/transport/netty/handler/HeartbeatHandler.class
 com/proxy/transport/netty/handler/ServerChannelHandler.class
 com/proxy/transport/netty/NettyTransporter.class

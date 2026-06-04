@@ -564,3 +564,113 @@ Unable to commit systemconfig database.
 2026-06-04 12:03:08.353 [nioEventLoopGroup-4-1] WARN  c.p.exchange.header.ExchangeHandler - Connection disconnected, failing all pending futures
 2026-06-04 12:03:08.353 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - DefaultFuture shut down complete, timer stopped
 2026-06-04 12:03:08.354 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Proxy Local Server stopped.
+2026-06-04 12:14:59.867 [main] INFO  com.proxy.local.ProxyLocalServer - Config loaded from classpath: proxy.yml
+2026-06-04 12:14:59.943 [main] INFO  com.proxy.local.ProxyLocalServer - SPI loaded - Cluster: failover, LoadBalance: roundrobin, Filters: 5
+2026-06-04 12:15:00.048 [main] INFO  c.p.t.netty.pool.ConnectionPool - Created new HTTP/2 connection to 127.0.0.1:9090, pool size: 1
+2026-06-04 12:15:00.048 [main] INFO  c.proxy.transport.netty.NettyClient - NettyClient connected to 127.0.0.1:9090 via HTTP/2
+2026-06-04 12:15:00.048 [main] INFO  c.p.transport.netty.NettyTransporter - Created NettyClient to 127.0.0.1:9090
+2026-06-04 12:15:00.049 [main] INFO  c.p.exchange.header.HeaderExchanger - HeaderExchanger created ExchangeClient to 127.0.0.1:9090
+2026-06-04 12:15:00.049 [main] INFO  com.proxy.local.ProxyLocalServer - Created invoker for 127.0.0.1:9090 (ssl=false, cipher=none) (connection 1)
+2026-06-04 12:15:00.052 [main] INFO  c.p.t.netty.pool.ConnectionPool - Created new HTTP/2 connection to 127.0.0.1:9090, pool size: 1
+2026-06-04 12:15:00.053 [main] INFO  c.proxy.transport.netty.NettyClient - NettyClient connected to 127.0.0.1:9090 via HTTP/2
+2026-06-04 12:15:00.053 [main] INFO  c.p.transport.netty.NettyTransporter - Created NettyClient to 127.0.0.1:9090
+2026-06-04 12:15:00.054 [main] INFO  c.p.exchange.header.HeaderExchanger - HeaderExchanger created ExchangeClient to 127.0.0.1:9090
+2026-06-04 12:15:00.054 [main] INFO  com.proxy.local.ProxyLocalServer - Created invoker for 127.0.0.1:9090 (ssl=false, cipher=none) (connection 2)
+2026-06-04 12:15:00.054 [main] INFO  com.proxy.local.ProxyLocalServer - Invoker chain assembled: 2 invokers, cluster=failover, loadBalance=roundrobin
+2026-06-04 12:15:00.059 [main] INFO  com.proxy.local.ProxyLocalServer - === Proxy Local Server started on port 1080 ===
+2026-06-04 12:15:00.059 [main] INFO  com.proxy.local.ProxyLocalServer -   SOCKS5 proxy: localhost:1080
+2026-06-04 12:15:00.060 [main] INFO  com.proxy.local.ProxyLocalServer -   HTTP  proxy:  localhost:1080
+2026-06-04 12:15:00.174 [main] INFO  c.p.l.sysproxy.MacSystemProxyManager - Detected active network services: [Wi-Fi]
+2026-06-04 12:15:00.358 [main] WARN  com.proxy.local.ProxyLocalServer - Failed to set system proxy (non-fatal): Command failed (exit=7): networksetup -setwebproxy Wi-Fi 127.0.0.1 1080
+Unable to commit systemconfig database.
+** Error: Unable to commit changes to network database.
+
+2026-06-04 12:15:33.692 [nioEventLoopGroup-3-1] WARN  c.p.local.handler.HttpConnectHandler - Non-CONNECT HTTP request not supported: GET http://httpbin.org/get HTTP/1.1
+2026-06-04 12:15:40.129 [nioEventLoopGroup-3-2] WARN  c.p.local.handler.HttpConnectHandler - Non-CONNECT HTTP request not supported: GET http://www.baidu.com/ HTTP/1.1
+2026-06-04 12:15:54.049 [nioEventLoopGroup-3-3] INFO  c.p.local.handler.HttpConnectHandler - HTTP CONNECT request: www.baidu.com:443 from /127.0.0.1:63571
+2026-06-04 12:15:54.210 [nioEventLoopGroup-4-1] WARN  com.proxy.crypto.NoneCipher - NoneCipher initialized — data will NOT be encrypted! Do NOT use in production.
+2026-06-04 12:15:54.401 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=347ms status=200
+2026-06-04 12:15:54.403 [nioEventLoopGroup-4-1] INFO  c.p.local.handler.HttpConnectHandler - HTTP tunnel established: www.baidu.com:443, streamId=1
+2026-06-04 12:15:54.403 [nioEventLoopGroup-5-1] WARN  com.proxy.crypto.NoneCipher - NoneCipher initialized — data will NOT be encrypted! Do NOT use in production.
+2026-06-04 12:15:54.415 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=12ms status=200
+2026-06-04 12:16:04.075 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=13ms status=200
+2026-06-04 12:16:04.082 [nioEventLoopGroup-4-1] WARN  c.p.exchange.header.ExchangeHandler - Connection disconnected, failing all pending futures
+2026-06-04 12:21:26.751 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Shutting down Proxy Local Server...
+2026-06-04 12:21:26.765 [nioEventLoopGroup-5-1] WARN  c.p.exchange.header.ExchangeHandler - Connection disconnected, failing all pending futures
+2026-06-04 12:21:26.766 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - Shutting down DefaultFuture, pending futures: 0
+2026-06-04 12:21:26.767 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - DefaultFuture shut down complete, timer stopped
+2026-06-04 12:21:26.767 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Proxy Local Server stopped.
+2026-06-04 12:22:10.336 [main] INFO  com.proxy.local.ProxyLocalServer - Config loaded from classpath: proxy.yml
+2026-06-04 12:22:10.410 [main] INFO  com.proxy.local.ProxyLocalServer - SPI loaded - Cluster: failover, LoadBalance: roundrobin, Filters: 5
+2026-06-04 12:22:10.501 [main] INFO  c.p.t.netty.pool.ConnectionPool - Created new HTTP/2 connection to 127.0.0.1:9090, pool size: 1
+2026-06-04 12:22:10.501 [main] INFO  c.proxy.transport.netty.NettyClient - NettyClient connected to 127.0.0.1:9090 via HTTP/2
+2026-06-04 12:22:10.501 [main] INFO  c.p.transport.netty.NettyTransporter - Created NettyClient to 127.0.0.1:9090
+2026-06-04 12:22:10.502 [main] INFO  c.p.exchange.header.HeaderExchanger - HeaderExchanger created ExchangeClient to 127.0.0.1:9090
+2026-06-04 12:22:10.503 [main] INFO  com.proxy.local.ProxyLocalServer - Created invoker for 127.0.0.1:9090 (ssl=false, cipher=none) (connection 1)
+2026-06-04 12:22:10.505 [main] INFO  c.p.t.netty.pool.ConnectionPool - Created new HTTP/2 connection to 127.0.0.1:9090, pool size: 1
+2026-06-04 12:22:10.505 [main] INFO  c.proxy.transport.netty.NettyClient - NettyClient connected to 127.0.0.1:9090 via HTTP/2
+2026-06-04 12:22:10.505 [main] INFO  c.p.transport.netty.NettyTransporter - Created NettyClient to 127.0.0.1:9090
+2026-06-04 12:22:10.505 [main] INFO  c.p.exchange.header.HeaderExchanger - HeaderExchanger created ExchangeClient to 127.0.0.1:9090
+2026-06-04 12:22:10.505 [main] INFO  com.proxy.local.ProxyLocalServer - Created invoker for 127.0.0.1:9090 (ssl=false, cipher=none) (connection 2)
+2026-06-04 12:22:10.505 [main] INFO  com.proxy.local.ProxyLocalServer - Invoker chain assembled: 2 invokers, cluster=failover, loadBalance=roundrobin
+2026-06-04 12:22:10.510 [main] INFO  com.proxy.local.ProxyLocalServer - === Proxy Local Server started on port 1080 ===
+2026-06-04 12:22:10.511 [main] INFO  com.proxy.local.ProxyLocalServer -   SOCKS5 proxy: localhost:1080
+2026-06-04 12:22:10.511 [main] INFO  com.proxy.local.ProxyLocalServer -   HTTP  proxy:  localhost:1080
+2026-06-04 12:22:10.655 [main] INFO  c.p.l.sysproxy.MacSystemProxyManager - Detected active network services: [Wi-Fi]
+2026-06-04 12:22:10.866 [main] WARN  com.proxy.local.ProxyLocalServer - Failed to set system proxy (non-fatal): Command failed (exit=7): networksetup -setwebproxy Wi-Fi 127.0.0.1 1080
+Unable to commit systemconfig database.
+** Error: Unable to commit changes to network database.
+
+2026-06-04 12:22:37.303 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Shutting down Proxy Local Server...
+2026-06-04 12:22:37.368 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - Shutting down DefaultFuture, pending futures: 0
+2026-06-04 12:22:37.368 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - DefaultFuture shut down complete, timer stopped
+2026-06-04 12:22:37.370 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Proxy Local Server stopped.
+2026-06-04 12:23:01.785 [main] INFO  com.proxy.local.ProxyLocalServer - Config loaded from classpath: proxy.yml
+2026-06-04 12:23:01.866 [main] INFO  com.proxy.local.ProxyLocalServer - SPI loaded - Cluster: failover, LoadBalance: roundrobin, Filters: 5
+2026-06-04 12:23:01.871 [main] INFO  c.p.t.netty.pool.ConnectionPool - Loaded 1 StreamPipelineCustomizer(s)
+2026-06-04 12:23:01.966 [main] INFO  c.p.t.netty.pool.ConnectionPool - Created new HTTP/2 connection to 127.0.0.1:9090, pool size: 1
+2026-06-04 12:23:01.966 [main] INFO  c.proxy.transport.netty.NettyClient - NettyClient connected to 127.0.0.1:9090 via HTTP/2
+2026-06-04 12:23:01.966 [main] INFO  c.p.transport.netty.NettyTransporter - Created NettyClient to 127.0.0.1:9090
+2026-06-04 12:23:01.967 [main] INFO  c.p.exchange.header.HeaderExchanger - HeaderExchanger created ExchangeClient to 127.0.0.1:9090
+2026-06-04 12:23:01.967 [main] INFO  com.proxy.local.ProxyLocalServer - Created invoker for 127.0.0.1:9090 (ssl=false, cipher=none) (connection 1)
+2026-06-04 12:23:01.968 [main] INFO  c.p.t.netty.pool.ConnectionPool - Loaded 1 StreamPipelineCustomizer(s)
+2026-06-04 12:23:01.969 [main] INFO  c.p.t.netty.pool.ConnectionPool - Created new HTTP/2 connection to 127.0.0.1:9090, pool size: 1
+2026-06-04 12:23:01.969 [main] INFO  c.proxy.transport.netty.NettyClient - NettyClient connected to 127.0.0.1:9090 via HTTP/2
+2026-06-04 12:23:01.969 [main] INFO  c.p.transport.netty.NettyTransporter - Created NettyClient to 127.0.0.1:9090
+2026-06-04 12:23:01.970 [main] INFO  c.p.exchange.header.HeaderExchanger - HeaderExchanger created ExchangeClient to 127.0.0.1:9090
+2026-06-04 12:23:01.970 [main] INFO  com.proxy.local.ProxyLocalServer - Created invoker for 127.0.0.1:9090 (ssl=false, cipher=none) (connection 2)
+2026-06-04 12:23:01.970 [main] INFO  com.proxy.local.ProxyLocalServer - Invoker chain assembled: 2 invokers, cluster=failover, loadBalance=roundrobin
+2026-06-04 12:23:01.975 [main] INFO  com.proxy.local.ProxyLocalServer - === Proxy Local Server started on port 1080 ===
+2026-06-04 12:23:01.975 [main] INFO  com.proxy.local.ProxyLocalServer -   SOCKS5 proxy: localhost:1080
+2026-06-04 12:23:01.975 [main] INFO  com.proxy.local.ProxyLocalServer -   HTTP  proxy:  localhost:1080
+2026-06-04 12:23:02.148 [main] INFO  c.p.l.sysproxy.MacSystemProxyManager - Detected active network services: [Wi-Fi]
+2026-06-04 12:23:02.391 [main] WARN  com.proxy.local.ProxyLocalServer - Failed to set system proxy (non-fatal): Command failed (exit=7): networksetup -setwebproxy Wi-Fi 127.0.0.1 1080
+Unable to commit systemconfig database.
+** Error: Unable to commit changes to network database.
+
+2026-06-04 12:23:21.369 [nioEventLoopGroup-3-1] INFO  c.p.local.handler.HttpConnectHandler - HTTP CONNECT request: www.baidu.com:443 from /127.0.0.1:49629
+2026-06-04 12:23:21.561 [nioEventLoopGroup-4-1] WARN  com.proxy.crypto.NoneCipher - NoneCipher initialized — data will NOT be encrypted! Do NOT use in production.
+2026-06-04 12:23:21.768 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=394ms status=200
+2026-06-04 12:23:21.770 [nioEventLoopGroup-4-1] INFO  c.p.local.handler.HttpConnectHandler - HTTP tunnel established: www.baidu.com:443, streamId=1
+2026-06-04 12:23:21.771 [nioEventLoopGroup-5-1] WARN  com.proxy.crypto.NoneCipher - NoneCipher initialized — data will NOT be encrypted! Do NOT use in production.
+2026-06-04 12:23:21.797 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=26ms status=200
+2026-06-04 12:23:21.826 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=2ms status=200
+2026-06-04 12:23:21.973 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=3ms status=200
+2026-06-04 12:23:21.998 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=2ms status=200
+2026-06-04 12:23:22.000 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=2ms status=200
+2026-06-04 12:23:22.002 [nioEventLoopGroup-5-1] WARN  c.p.exchange.header.ExchangeHandler - Connection disconnected, failing all pending futures
+2026-06-04 12:23:29.149 [nioEventLoopGroup-3-2] INFO  c.p.local.handler.HttpConnectHandler - HTTP CONNECT request: www.baidu.com:443 from /127.0.0.1:49665
+2026-06-04 12:23:29.151 [nioEventLoopGroup-4-1] WARN  com.proxy.crypto.NoneCipher - NoneCipher initialized — data will NOT be encrypted! Do NOT use in production.
+2026-06-04 12:23:29.155 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=5ms status=200
+2026-06-04 12:23:29.155 [nioEventLoopGroup-4-1] INFO  c.p.local.handler.HttpConnectHandler - HTTP tunnel established: www.baidu.com:443, streamId=2
+2026-06-04 12:23:29.156 [nioEventLoopGroup-5-1] WARN  com.proxy.crypto.NoneCipher - NoneCipher initialized — data will NOT be encrypted! Do NOT use in production.
+2026-06-04 12:23:29.169 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=13ms status=200
+2026-06-04 12:23:29.195 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=1ms status=200
+2026-06-04 12:23:29.213 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=2ms status=200
+2026-06-04 12:23:29.229 [nioEventLoopGroup-4-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=2ms status=200
+2026-06-04 12:23:29.229 [nioEventLoopGroup-5-1] INFO  ACCESS_LOG - [OK] www.baidu.com:443 elapsed=1ms status=200
+2026-06-04 12:23:29.230 [nioEventLoopGroup-5-1] WARN  c.p.exchange.header.ExchangeHandler - Connection disconnected, failing all pending futures
+2026-06-04 12:23:54.093 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Shutting down Proxy Local Server...
+2026-06-04 12:23:54.104 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - Shutting down DefaultFuture, pending futures: 0
+2026-06-04 12:23:54.105 [shutdown-hook] INFO  c.p.exchange.header.DefaultFuture - DefaultFuture shut down complete, timer stopped
+2026-06-04 12:23:54.105 [shutdown-hook] INFO  com.proxy.local.ProxyLocalServer - Proxy Local Server stopped.

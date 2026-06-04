@@ -11,10 +11,8 @@ import com.proxy.common.filter.Invoker;
 import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
 import com.proxy.exchange.header.DefaultFuture;
-import com.proxy.exchange.header.ServerPushHandler;
 import com.proxy.local.config.ProxyConfig;
 import com.proxy.local.handler.HttpConnectHandler;
-import com.proxy.local.handler.LocalServerPushHandler;
 import com.proxy.local.handler.ProtocolDetector;
 import com.proxy.local.handler.RelayHandler;
 import com.proxy.local.handler.Socks5ConnectHandler;
@@ -107,9 +105,7 @@ public class ProxyLocalServer {
                 url.addParameter("cipherKey", server.getCipherKey());
 
                 // Exchanger.connect() → 内部创建 Transporter 连接 → 包装为 ExchangeClient
-                // 传入 ServerPushHandler 处理远程推送的数据（requestId=0）
-                ServerPushHandler pushHandler = new LocalServerPushHandler();
-                ExchangeClient exchangeClient = exchanger.connect(url, pushHandler);
+                ExchangeClient exchangeClient = exchanger.connect(url);
 
                 // ClientInvoker 适配 ExchangeClient → Invoker 接口
                 ClientInvoker clientInvoker = new ClientInvoker(exchangeClient, config.getTimeoutMs());
