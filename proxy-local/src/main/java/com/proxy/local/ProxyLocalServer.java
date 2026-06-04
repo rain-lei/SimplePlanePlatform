@@ -15,6 +15,7 @@ import com.proxy.local.config.ProxyConfig;
 import com.proxy.local.handler.HttpConnectHandler;
 import com.proxy.local.handler.ProtocolDetector;
 import com.proxy.local.handler.RelayHandler;
+import com.proxy.local.handler.RouteRule;
 import com.proxy.local.handler.Socks5ConnectHandler;
 import com.proxy.local.handler.Socks5InitHandler;
 import com.proxy.local.sysproxy.NoopSystemProxyManager;
@@ -51,6 +52,7 @@ public class ProxyLocalServer {
 
     private final ProxyConfig config;
     private final Invoker clusterInvoker;
+    private final RouteRule routeRule;
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
     private final SystemProxyManager systemProxyManager;
@@ -67,6 +69,9 @@ public class ProxyLocalServer {
         } else {
             this.systemProxyManager = new NoopSystemProxyManager();
         }
+
+        // 初始化路由规则
+        this.routeRule = new RouteRule(config.getRoute());
 
         // 组装调用链
         this.clusterInvoker = buildInvokerChain();
@@ -143,7 +148,7 @@ public class ProxyLocalServer {
                     protected void initChannel(SocketChannel ch) throws Exception {
                         // 协议检测器：根据首字节判断 SOCKS5 还是 HTTP CONNECT
                         ch.pipeline().addLast("protocol-detector",
-                                new ProtocolDetector(clusterInvoker, config.isHttpProxyEnabled()));
+                                new ProtocolDetector(clusterInvoker, config.isHttpProxyEnabled(), routeRule));
                     }
                 });
 

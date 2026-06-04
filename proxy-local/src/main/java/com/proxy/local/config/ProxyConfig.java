@@ -56,6 +56,11 @@ public class ProxyConfig {
     private SystemProxy systemProxy = new SystemProxy();
 
     /**
+     * 路由规则配置
+     */
+    private RouteConfig route = new RouteConfig();
+
+    /**
      * 系统代理配置
      */
     public static class SystemProxy {
@@ -83,6 +88,39 @@ public class ProxyConfig {
 
         public void setHost(String host) {
             this.host = host;
+        }
+    }
+
+    /**
+     * 路由规则配置
+     */
+    public static class RouteConfig {
+        private String defaultRoute = "direct";
+        private List<String> proxyList = new ArrayList<>();
+        private List<String> directList = new ArrayList<>();
+
+        public String getDefaultRoute() {
+            return defaultRoute;
+        }
+
+        public void setDefaultRoute(String defaultRoute) {
+            this.defaultRoute = defaultRoute;
+        }
+
+        public List<String> getProxyList() {
+            return proxyList;
+        }
+
+        public void setProxyList(List<String> proxyList) {
+            this.proxyList = proxyList;
+        }
+
+        public List<String> getDirectList() {
+            return directList;
+        }
+
+        public void setDirectList(List<String> directList) {
+            this.directList = directList;
         }
     }
 
@@ -269,5 +307,13 @@ public class ProxyConfig {
 
     public void setSystemProxy(SystemProxy systemProxy) {
         this.systemProxy = systemProxy;
+    }
+
+    public RouteConfig getRoute() {
+        return route;
+    }
+
+    public void setRoute(RouteConfig route) {
+        this.route = route;
     }
 }

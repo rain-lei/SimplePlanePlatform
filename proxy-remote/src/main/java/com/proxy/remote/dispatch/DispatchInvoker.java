@@ -59,6 +59,30 @@ public class DispatchInvoker implements Invoker {
     public CompletableFuture<Response> invoke(Invocation invocation) throws ProxyException {
         CompletableFuture<Response> future = new CompletableFuture<>();
 
+        // DATA 消息：如果 session 已 ACTIVE 则直接在 IO 线程处理（非阻塞 writeAndFlush），
+        // 保证同一个 stream 的帧严格按到达顺序 forward，防止 TLS record 乱序。
+        // 如果 session 还在 CONNECTING，则退化到线程池等待（此时只有第一个 DATA 帧需要等待）。
+        if (invocation.getType() == ProxyMessage.MessageType.DATA && connector != null) {
+            String sk = (String) invocation.getAttachment("streamId");
+            OutboundSession sess = sessionManager.get(sk);
+            if (sess != null && sess.getState() == OutboundSession.SessionState.ACTIVE) {
+                // 已就绪，直接在当前 IO 线程转发（保序）
+                try {
+                    sess.forward(invocation.getData());
+                    log.debug("Handle DATA (fast-path): sessionKey={}, dataLength={}",
+                            sk, invocation.getData() != null ? invocation.getData().length : 0);
+                } catch (Exception e) {
+                    log.error("Fast-path DATA error: sessionKey={}", sk, e);
+                    future.complete(Response.error("Forward error: " + e.getMessage()));
+                    return future;
+                }
+                future.complete(null); // DATA 为发后即忘
+                return future;
+            }
+            // session 不存在或还在 CONNECTING → 退化到线程池
+        }
+
+        // CONNECT / DISCONNECT 提交到业务线程池异步处理
         try {
             bizExecutor.execute(() -> {
                 try {

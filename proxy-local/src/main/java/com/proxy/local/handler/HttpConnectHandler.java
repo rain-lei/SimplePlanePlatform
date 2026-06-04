@@ -55,10 +55,12 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
     private static final int MAX_HEADER_SIZE = 8192;
 
     private final Invoker invoker;
+    private final RouteRule routeRule;
     private final StreamChannelRegistry streamRegistry = StreamChannelRegistry.getInstance();
 
-    public HttpConnectHandler(Invoker invoker) {
+    public HttpConnectHandler(Invoker invoker, RouteRule routeRule) {
         this.invoker = invoker;
+        this.routeRule = routeRule;
     }
 
     @Override
@@ -121,43 +123,67 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
 
         log.info("HTTP CONNECT request: {}:{} from {}", targetHost, targetPort, ctx.channel().remoteAddress());
 
-        // 分配唯一 streamId 并注册浏览器 ctx
-        final long streamId = streamRegistry.nextStreamId();
-        streamRegistry.register(streamId, ctx);
-
-        // 通过 ClusterInvoker 向远程发送 CONNECT 请求
-        Invocation invocation = new Invocation(targetHost, targetPort, null, ProxyMessage.MessageType.CONNECT);
-        invocation.setAttachment("streamId", streamId);
         final String host = targetHost;
         final int port = targetPort;
 
-        invoker.invoke(invocation).whenComplete((response, throwable) -> {
-            if (throwable != null) {
-                log.error("HTTP CONNECT failed for {}:{}", host, port, throwable);
-                streamRegistry.unregister(streamId);
-                ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
-                ctx.close();
-                return;
-            }
+        // 路由判断：走代理还是直连
+        if (routeRule != null && !routeRule.shouldProxy(host)) {
+            // === 直连模式 ===
+            log.info("Route DIRECT: {}:{}", host, port);
+            DirectRelayHandler directHandler = new DirectRelayHandler(host, port);
+            directHandler.connect(ctx).addListener(future -> {
+                if (future.isSuccess()) {
+                    // 回复 200 Connection Established
+                    ctx.writeAndFlush(Unpooled.copiedBuffer(CONNECT_RESPONSE, StandardCharsets.UTF_8));
+                    // 切换到直连 relay 模式
+                    ctx.pipeline().addLast("direct-relay", directHandler);
+                    ctx.pipeline().remove(HttpConnectHandler.this);
+                    log.info("HTTP direct tunnel established: {}:{}", host, port);
+                } else {
+                    log.warn("HTTP direct connection failed for {}:{}", host, port);
+                    ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
+                    ctx.close();
+                }
+            });
+        } else {
+            // === 代理模式 ===
+            log.info("Route PROXY: {}:{}", host, port);
 
-            if (response != null && response.isSuccess()) {
-                // 回复 200 Connection Established
-                ctx.writeAndFlush(Unpooled.copiedBuffer(CONNECT_RESPONSE, StandardCharsets.UTF_8));
+            // 分配唯一 streamId 并注册浏览器 ctx
+            final long streamId = streamRegistry.nextStreamId();
+            streamRegistry.register(streamId, ctx);
 
-                // 切换到 Relay 模式：先添加 RelayHandler，再移除自身
-                // 注意：ByteToMessageDecoder 移除时会自动将未读数据 fire 给下一个 Handler
-                ctx.pipeline().addLast("relay", new RelayHandler(invoker, host, port, streamId));
-                ctx.pipeline().remove(HttpConnectHandler.this);
+            // 通过 ClusterInvoker 向远程发送 CONNECT 请求
+            Invocation invocation = new Invocation(targetHost, targetPort, null, ProxyMessage.MessageType.CONNECT);
+            invocation.setAttachment("streamId", streamId);
 
-                log.info("HTTP tunnel established: {}:{}, streamId={}", host, port, streamId);
-            } else {
-                String errMsg = response != null ? response.getErrorMessage() : "unknown error";
-                log.warn("HTTP CONNECT rejected for {}:{}: {}", host, port, errMsg);
-                streamRegistry.unregister(streamId);
-                ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
-                ctx.close();
-            }
-        });
+            invoker.invoke(invocation).whenComplete((response, throwable) -> {
+                if (throwable != null) {
+                    log.error("HTTP CONNECT failed for {}:{}", host, port, throwable);
+                    streamRegistry.unregister(streamId);
+                    ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
+                    ctx.close();
+                    return;
+                }
+
+                if (response != null && response.isSuccess()) {
+                    // 回复 200 Connection Established
+                    ctx.writeAndFlush(Unpooled.copiedBuffer(CONNECT_RESPONSE, StandardCharsets.UTF_8));
+
+                    // 切换到 Relay 模式：先添加 RelayHandler，再移除自身
+                    ctx.pipeline().addLast("relay", new RelayHandler(invoker, host, port, streamId));
+                    ctx.pipeline().remove(HttpConnectHandler.this);
+
+                    log.info("HTTP tunnel established: {}:{}, streamId={}", host, port, streamId);
+                } else {
+                    String errMsg = response != null ? response.getErrorMessage() : "unknown error";
+                    log.warn("HTTP CONNECT rejected for {}:{}: {}", host, port, errMsg);
+                    streamRegistry.unregister(streamId);
+                    ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
+                    ctx.close();
+                }
+            });
+        }
     }
 
     /**

@@ -81,7 +81,8 @@ public class NettyServer implements Server {
                             // 父 Channel Pipeline: HTTP/2 帧编解码 + 多路复用
                             Http2FrameCodec frameCodec = Http2FrameCodecBuilder.forServer()
                                     .initialSettings(Http2Settings.defaultSettings()
-                                            .maxConcurrentStreams(maxStreams))
+                                            .maxConcurrentStreams(maxStreams)
+                                            .initialWindowSize(1024 * 1024))  // 1MB window (default 64KB is too small)
                                     .build();
 
                             // 子 Channel 初始化器（每个 HTTP/2 Stream）

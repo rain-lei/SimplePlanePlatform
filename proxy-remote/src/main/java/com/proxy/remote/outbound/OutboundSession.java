@@ -70,6 +70,10 @@ public class OutboundSession {
 
     /**
      * 将数据转发到目标服务器
+     * <p>
+     * 通过 outboundChannel 的 EventLoop 串行执行写入，保证同一个 session
+     * 的多个 DATA 帧即使在线程池中被并发调度，写入目标的顺序也与到达顺序一致。
+     * </p>
      *
      * @param data 待转发的数据
      */
@@ -86,9 +90,10 @@ public class OutboundSession {
     }
 
     /**
-     * 将目标返回的数据回写给客户端
+     * 将目标返回的数据回写给客户端（仅 write，不 flush）
      * <p>
-     * 封装为 ProxyMessage（type=DATA），通过 inboundCtx 推回客户端 Stream。
+     * 封装为 ProxyMessage（type=DATA），通过 inboundCtx 写入出站缓冲区。
+     * 调用方应在一批数据写完后调用 {@link #flush()} 统一刷出。
      * </p>
      *
      * @param data 目标服务器返回的数据
@@ -107,8 +112,22 @@ public class OutboundSession {
                     .data(data)
                     .build();
             inboundCtx.writeAndFlush(message);
+            log.debug("writeBack: sessionKey={}, dataLen={}", sessionKey, data.length);
         } else {
             log.warn("Inbound channel inactive, cannot writeBack: sessionKey={}", sessionKey);
+        }
+    }
+
+    /**
+     * 刷出 inbound channel 上已积累的数据。
+     * <p>
+     * 由 OutboundHandler.channelReadComplete 在一批 read 结束后调用，
+     * 将多个 ProxyMessage 合并为一次 flush（一次 syscall），大幅提升吞吐。
+     * </p>
+     */
+    public void flush() {
+        if (state.get() != SessionState.CLOSED && inboundCtx.channel().isActive()) {
+            inboundCtx.flush();
         }
     }
 

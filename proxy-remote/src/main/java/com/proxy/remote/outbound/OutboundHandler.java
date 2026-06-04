@@ -13,8 +13,8 @@ import org.slf4j.LoggerFactory;
  * 收到目标返回的字节后，通过 OutboundSession 回推给客户端。
  * </p>
  * <p>
- * 这是 Outbound Channel 上唯一的业务 Handler，Pipeline 极简：
- * HEAD → OutboundHandler → TAIL
+ * 性能优化：使用 write（非 writeAndFlush）在 channelRead 期间累积数据，
+ * 在 channelReadComplete 时统一 flush，大幅减少系统调用次数，提升吞吐。
  * </p>
  */
 public class OutboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
@@ -33,8 +33,15 @@ public class OutboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
         byte[] data = new byte[msg.readableBytes()];
         msg.readBytes(data);
 
-        // 通过 session 回写给客户端
+        // 通过 session 回写给客户端（仅 write，不 flush）
         session.writeBack(data);
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        // 一批 channelRead 结束后，统一 flush inbound channel
+        session.flush();
+        super.channelReadComplete(ctx);
     }
 
     @Override

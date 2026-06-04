@@ -39,9 +39,11 @@ public class Socks5InitHandler extends ChannelInboundHandlerAdapter {
     private static final byte NO_AUTH = 0x00;
 
     private final Invoker invoker;
+    private final RouteRule routeRule;
 
-    public Socks5InitHandler(Invoker invoker) {
+    public Socks5InitHandler(Invoker invoker, RouteRule routeRule) {
         this.invoker = invoker;
+        this.routeRule = routeRule;
     }
 
     @Override
@@ -84,7 +86,7 @@ public class Socks5InitHandler extends ChannelInboundHandlerAdapter {
             log.debug("SOCKS5 auth negotiation complete (NO_AUTH) for {}", ctx.channel().remoteAddress());
 
             // 替换为 CONNECT 请求处理器
-            ctx.pipeline().addLast("socks5-connect", new Socks5ConnectHandler(invoker));
+            ctx.pipeline().addLast("socks5-connect", new Socks5ConnectHandler(invoker, routeRule));
             ctx.pipeline().remove(this);
         } finally {
             buf.release();

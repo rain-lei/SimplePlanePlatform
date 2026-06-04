@@ -25,10 +25,12 @@ public class ProtocolDetector extends ChannelInboundHandlerAdapter {
 
     private final Invoker invoker;
     private final boolean httpProxyEnabled;
+    private final RouteRule routeRule;
 
-    public ProtocolDetector(Invoker invoker, boolean httpProxyEnabled) {
+    public ProtocolDetector(Invoker invoker, boolean httpProxyEnabled, RouteRule routeRule) {
         this.invoker = invoker;
         this.httpProxyEnabled = httpProxyEnabled;
+        this.routeRule = routeRule;
     }
 
     @Override
@@ -50,13 +52,13 @@ public class ProtocolDetector extends ChannelInboundHandlerAdapter {
         if (firstByte == SOCKS5_VERSION) {
             // SOCKS5 协议
             log.debug("Detected SOCKS5 protocol from {}", ctx.channel().remoteAddress());
-            ctx.pipeline().addLast("socks5-init", new Socks5InitHandler(invoker));
+            ctx.pipeline().addLast("socks5-init", new Socks5InitHandler(invoker, routeRule));
             ctx.pipeline().remove(this);
             ctx.fireChannelRead(msg);
         } else if (httpProxyEnabled && isHttpMethod(firstByte)) {
             // HTTP CONNECT 协议
             log.debug("Detected HTTP proxy protocol from {}", ctx.channel().remoteAddress());
-            ctx.pipeline().addLast("http-connect", new HttpConnectHandler(invoker));
+            ctx.pipeline().addLast("http-connect", new HttpConnectHandler(invoker, routeRule));
             ctx.pipeline().remove(this);
             ctx.fireChannelRead(msg);
         } else {

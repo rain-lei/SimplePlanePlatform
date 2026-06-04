@@ -21,6 +21,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.Http2Settings;
@@ -225,19 +226,45 @@ public class Http2Connection {
                             ch.pipeline().addLast("ssl",
                                     sslContext.newHandler(ch.alloc(), url.getHost(), url.getPort()));
                         }
-                        ch.pipeline().addLast("http2-codec",
-                                Http2FrameCodecBuilder.forClient()
-                                        .initialSettings(Http2Settings.defaultSettings()
-                                                .maxConcurrentStreams(config.getMaxStreamsPerConnection()))
-                                        .build());
+                        Http2FrameCodec frameCodec = Http2FrameCodecBuilder.forClient()
+                                .initialSettings(Http2Settings.defaultSettings()
+                                        .maxConcurrentStreams(config.getMaxStreamsPerConnection())
+                                        .initialWindowSize(1024 * 1024))  // 1MB stream window
+                                .build();
+                        ch.pipeline().addLast("http2-codec", frameCodec);
                         // 入站（服务端推送）Stream 也使用同一套 pipeline
                         ch.pipeline().addLast("http2-multiplex",
                                 new Http2MultiplexHandler(new ChannelInitializer<Channel>() {
                                     @Override
-                                    protected void initChannel(Channel ch) {
-                                        installStreamPipeline(ch);
+                                    protected void initChannel(Channel streamCh) {
+                                        installStreamPipeline(streamCh);
                                     }
                                 }));
+                        // 连接建立后增大 connection-level flow control window
+                        // HTTP/2 spec: connection window 初始为 65535，需要通过 WINDOW_UPDATE 增大
+                        ch.pipeline().addLast("window-update", new io.netty.channel.ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void userEventTriggered(io.netty.channel.ChannelHandlerContext ctx, Object evt) throws Exception {
+                                if (evt instanceof io.netty.handler.codec.http2.Http2ConnectionPrefaceAndSettingsFrameWrittenEvent) {
+                                    // HTTP/2 preface 和 SETTINGS 帧已发送，现在可以安全增大 connection window
+                                    Http2FrameCodec codec = ctx.pipeline().get(Http2FrameCodec.class);
+                                    if (codec != null) {
+                                        io.netty.handler.codec.http2.Http2Connection conn = codec.connection();
+                                        int increment = 16 * 1024 * 1024 - 65535;
+                                        try {
+                                            conn.local().flowController().incrementWindowSize(
+                                                    conn.connectionStream(), increment);
+                                            ctx.flush();
+                                            log.info("Increased connection-level window by {} (total ~16MB)", increment);
+                                        } catch (Exception e) {
+                                            log.warn("Failed to increment connection window: {}", e.getMessage());
+                                        }
+                                    }
+                                    ctx.pipeline().remove(this);
+                                }
+                                super.userEventTriggered(ctx, evt);
+                            }
+                        });
                     }
                 });
         return b;

@@ -24,7 +24,7 @@ cipher: none
 cipherKey: my-secret-key-123
 
 # 单连接最大并发 Stream 数
-maxStreams: 100
+maxStreams: 1000
 
 # 读空闲超时（秒），超过该时间未收到数据则触发心跳检测
 readIdleTimeout: 60

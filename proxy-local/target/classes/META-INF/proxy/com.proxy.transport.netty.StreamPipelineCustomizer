@@ -1,3 +1,0 @@
-# StreamPipelineCustomizer SPI 扩展配置
-# proxy-local: 注入 ServerPushDispatchHandler 用于路由远程推送数据到浏览器
-local-push-dispatch=com.proxy.local.handler.LocalStreamPipelineCustomizer

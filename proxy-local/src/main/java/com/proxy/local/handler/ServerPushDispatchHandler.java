@@ -19,6 +19,10 @@ import org.slf4j.LoggerFactory;
  * <p>
  * 对于 requestId>0 的正常请求-响应消息，直接透传给下游 Handler 处理。
  * </p>
+ * <p>
+ * 性能优化：使用 write（非 writeAndFlush）累积数据，在 channelReadComplete 时统一 flush，
+ * 将同一批到达的多个推送消息合并为一次系统调用，大幅提升吞吐。
+ * </p>
  */
 @ChannelHandler.Sharable
 public class ServerPushDispatchHandler extends SimpleChannelInboundHandler<ProxyMessage> {
@@ -26,6 +30,7 @@ public class ServerPushDispatchHandler extends SimpleChannelInboundHandler<Proxy
     private static final Logger log = LoggerFactory.getLogger(ServerPushDispatchHandler.class);
 
     private final StreamChannelRegistry registry = StreamChannelRegistry.getInstance();
+
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, ProxyMessage msg) throws Exception {

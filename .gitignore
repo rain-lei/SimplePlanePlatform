@@ -1,0 +1,38 @@
+# === Build artifacts ===
+**/target/
+*.class
+*.jar
+*.war
+*.ear
+
+# === IDE ===
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Logs ===
+logs/
+*.log
+
+# === Keys & Secrets ===
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
+# === JVM ===
+hs_err_pid*.log
+replay_pid*.log
+
+# === Misc ===
+/tmp/

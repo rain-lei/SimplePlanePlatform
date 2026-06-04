@@ -55,10 +55,12 @@ public class Socks5ConnectHandler extends ChannelInboundHandlerAdapter {
     private static final byte REP_ATYP_NOT_SUPPORTED = 0x08;
 
     private final Invoker invoker;
+    private final RouteRule routeRule;
     private final StreamChannelRegistry streamRegistry = StreamChannelRegistry.getInstance();
 
-    public Socks5ConnectHandler(Invoker invoker) {
+    public Socks5ConnectHandler(Invoker invoker, RouteRule routeRule) {
         this.invoker = invoker;
+        this.routeRule = routeRule;
     }
 
     @Override
@@ -128,42 +130,65 @@ public class Socks5ConnectHandler extends ChannelInboundHandlerAdapter {
 
             log.info("SOCKS5 CONNECT request: {}:{} from {}", targetHost, targetPort, ctx.channel().remoteAddress());
 
-            // 分配唯一 streamId 并注册浏览器 ctx
-            final long streamId = streamRegistry.nextStreamId();
-            streamRegistry.register(streamId, ctx);
-
-            // 通过 ClusterInvoker 向远程发送 CONNECT 请求
-            Invocation invocation = new Invocation(targetHost, targetPort, null, ProxyMessage.MessageType.CONNECT);
-            invocation.setAttachment("streamId", streamId);
             final String host = targetHost;
             final int port = targetPort;
 
-            invoker.invoke(invocation).whenComplete((response, throwable) -> {
-                if (throwable != null) {
-                    log.error("CONNECT failed for {}:{}", host, port, throwable);
-                    streamRegistry.unregister(streamId);
-                    sendReply(ctx, REP_HOST_UNREACHABLE);
-                    ctx.close();
-                    return;
-                }
+            // 路由判断：走代理还是直连
+            if (routeRule != null && !routeRule.shouldProxy(host)) {
+                // === 直连模式 ===
+                log.info("Route DIRECT (SOCKS5): {}:{}", host, port);
+                DirectRelayHandler directHandler = new DirectRelayHandler(host, port);
+                directHandler.connect(ctx).addListener(future -> {
+                    if (future.isSuccess()) {
+                        sendReply(ctx, REP_SUCCESS);
+                        ctx.pipeline().addLast("direct-relay", directHandler);
+                        ctx.pipeline().remove(Socks5ConnectHandler.this);
+                        log.info("SOCKS5 direct tunnel established: {}:{}", host, port);
+                    } else {
+                        log.warn("SOCKS5 direct connection failed for {}:{}", host, port);
+                        sendReply(ctx, REP_HOST_UNREACHABLE);
+                        ctx.close();
+                    }
+                });
+            } else {
+                // === 代理模式 ===
+                log.info("Route PROXY (SOCKS5): {}:{}", host, port);
 
-                if (response != null && response.isSuccess()) {
-                    // 连接成功，回复 SOCKS5 成功
-                    sendReply(ctx, REP_SUCCESS);
+                // 分配唯一 streamId 并注册浏览器 ctx
+                final long streamId = streamRegistry.nextStreamId();
+                streamRegistry.register(streamId, ctx);
 
-                    // 切换到 Relay 模式
-                    ctx.pipeline().addLast("relay", new RelayHandler(invoker, host, port, streamId));
-                    ctx.pipeline().remove(this);
+                // 通过 ClusterInvoker 向远程发送 CONNECT 请求
+                Invocation invocation = new Invocation(targetHost, targetPort, null, ProxyMessage.MessageType.CONNECT);
+                invocation.setAttachment("streamId", streamId);
 
-                    log.info("SOCKS5 tunnel established: {}:{}, streamId={}", host, port, streamId);
-                } else {
-                    String errMsg = response != null ? response.getErrorMessage() : "unknown error";
-                    log.warn("CONNECT rejected for {}:{}: {}", host, port, errMsg);
-                    streamRegistry.unregister(streamId);
-                    sendReply(ctx, REP_HOST_UNREACHABLE);
-                    ctx.close();
-                }
-            });
+                invoker.invoke(invocation).whenComplete((response, throwable) -> {
+                    if (throwable != null) {
+                        log.error("CONNECT failed for {}:{}", host, port, throwable);
+                        streamRegistry.unregister(streamId);
+                        sendReply(ctx, REP_HOST_UNREACHABLE);
+                        ctx.close();
+                        return;
+                    }
+
+                    if (response != null && response.isSuccess()) {
+                        // 连接成功，回复 SOCKS5 成功
+                        sendReply(ctx, REP_SUCCESS);
+
+                        // 切换到 Relay 模式
+                        ctx.pipeline().addLast("relay", new RelayHandler(invoker, host, port, streamId));
+                        ctx.pipeline().remove(Socks5ConnectHandler.this);
+
+                        log.info("SOCKS5 tunnel established: {}:{}, streamId={}", host, port, streamId);
+                    } else {
+                        String errMsg = response != null ? response.getErrorMessage() : "unknown error";
+                        log.warn("CONNECT rejected for {}:{}: {}", host, port, errMsg);
+                        streamRegistry.unregister(streamId);
+                        sendReply(ctx, REP_HOST_UNREACHABLE);
+                        ctx.close();
+                    }
+                });
+            }
         } finally {
             buf.release();
         }
