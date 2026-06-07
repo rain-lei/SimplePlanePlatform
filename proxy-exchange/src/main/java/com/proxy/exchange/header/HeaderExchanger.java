@@ -30,9 +30,9 @@ import org.slf4j.LoggerFactory;
  * <p>
  * bind() 内部流程：
  * <pre>
- * 1. 创建 ServerExchangeHandler（持有 Invoker 引用，实现 InvokerAware）
+ * 1. 创建 ExchangeHandler(invoker)（服务端角色，持有 Invoker 引用）
  * 2. 通过 SPI 加载 Transporter，调用 transporter.bind(url, handler)
- *    - Transporter 从 handler 中提取 Invoker，注入 ServerChannelHandler
+ *    - handler 本身即 @Sharable ChannelHandler，直接加入 Pipeline
  *    - 返回底层 Server
  * 3. 包装成 HeaderExchangeServer 返回
  * </pre>
@@ -59,8 +59,9 @@ public class HeaderExchanger implements Exchanger {
 
     @Override
     public ExchangeServer bind(URL url, Invoker invoker) {
-        // 1. 创建 ServerExchangeHandler（持有 Invoker，实现 InvokerAware）
-        ServerExchangeHandler handler = new ServerExchangeHandler(invoker);
+        // 1. 创建 ExchangeHandler（传入 invoker → 服务端角色）
+        //    与 connect() 中的 ExchangeHandler（无 invoker → 客户端角色）共用同一个类
+        ExchangeHandler handler = new ExchangeHandler(invoker);
 
         // 2. 通过 SPI 加载 Transporter，绑定端口
         Transporter transporter = ExtensionLoader.getLoader(Transporter.class).getDefaultExtension();

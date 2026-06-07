@@ -1,0 +1,17 @@
+[Unit]
+Description=Netty Proxy Remote Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/java -jar /home/ubuntu/proxy-remote-1.0.0-SNAPSHOT.jar
+Restart=always
+RestartSec=3
+StandardOutput=append:/home/ubuntu/proxy-remote.log
+StandardError=append:/home/ubuntu/proxy-remote.log
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target

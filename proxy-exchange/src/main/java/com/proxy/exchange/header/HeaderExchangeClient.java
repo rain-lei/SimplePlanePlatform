@@ -1,7 +1,6 @@
 package com.proxy.exchange.header;
 
 import com.proxy.common.exchange.ExchangeClient;
-import com.proxy.common.exchange.PushHandler;
 import com.proxy.common.filter.Response;
 import com.proxy.common.model.ProxyMessage;
 import com.proxy.common.model.URL;
@@ -10,16 +9,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * ExchangeClient 默认实现 —— 包装底层 Client，提供请求-响应能力
  * <p>
  * 核心职责：
  * - request() 时生成 requestId → 创建 DefaultFuture → client.send() → 返回 Future
+ * - send() 数据面发后即忘，不生成 requestId
  * - IO 线程收到响应后，ExchangeHandler 调用 DefaultFuture.received() 唤醒业务线程
  * </p>
  * <p>
- * 被 ClientInvoker 持有，ClientInvoker.invoke() 内部调用 request()。
+ * 被 ClientInvoker 持有，ClientInvoker.invoke() 内部调用 request() 或 send()。
  * </p>
  */
 public class HeaderExchangeClient implements ExchangeClient {
@@ -30,16 +31,8 @@ public class HeaderExchangeClient implements ExchangeClient {
 
     private final Client client;
     private final URL url;
-    /**
-     * 持有 ExchangeHandler 引用，用于转发 PushHandler 注册（数据面推送出口）。
-     * 可为 null（若未传入，则不支持推送回调）。
-     */
     private final ExchangeHandler exchangeHandler;
     private volatile boolean closed = false;
-
-    public HeaderExchangeClient(Client client, URL url) {
-        this(client, url, null);
-    }
 
     public HeaderExchangeClient(Client client, URL url, ExchangeHandler exchangeHandler) {
         this.client = client;
@@ -86,9 +79,9 @@ public class HeaderExchangeClient implements ExchangeClient {
     }
 
     @Override
-    public void stream(ProxyMessage message) {
+    public void send(ProxyMessage message) {
         if (!isAvailable()) {
-            log.warn("stream() called but ExchangeClient not available, dropping: streamId={}",
+            log.warn("send() called but ExchangeClient not available, dropping: streamId={}",
                     message != null ? message.getStreamId() : -1);
             return;
         }
@@ -97,16 +90,7 @@ public class HeaderExchangeClient implements ExchangeClient {
         try {
             client.send(message);
         } catch (Exception e) {
-            log.error("stream() send failed: streamId={}", message.getStreamId(), e);
-        }
-    }
-
-    @Override
-    public void setPushHandler(PushHandler pushHandler) {
-        if (exchangeHandler != null) {
-            exchangeHandler.setPushHandler(pushHandler);
-        } else {
-            log.warn("setPushHandler called but no ExchangeHandler bound, push callbacks disabled");
+            log.error("send() failed: streamId={}", message.getStreamId(), e);
         }
     }
 
@@ -127,6 +111,16 @@ public class HeaderExchangeClient implements ExchangeClient {
     @Override
     public Client getClient() {
         return client;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void setStreamRegistry(ConcurrentHashMap streamRegistry) {
+        if (exchangeHandler != null) {
+            exchangeHandler.setStreamRegistry(streamRegistry);
+        } else {
+            log.warn("setStreamRegistry called but no ExchangeHandler bound");
+        }
     }
 
     private long getDefaultTimeout() {

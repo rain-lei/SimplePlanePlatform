@@ -2,13 +2,15 @@ package com.proxy.transport.netty;
 
 import com.proxy.common.crypto.Cipher;
 import com.proxy.common.crypto.CipherConfig;
-import com.proxy.common.filter.Invoker;
 import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
-import com.proxy.common.transport.MessageHandler;
 import com.proxy.common.transport.Server;
 import com.proxy.common.transport.TransportException;
-import com.proxy.transport.netty.handler.*;
+import com.proxy.transport.netty.handler.CipherDecodeHandler;
+import com.proxy.transport.netty.handler.CipherEncodeHandler;
+import com.proxy.transport.netty.handler.HeartbeatHandler;
+import com.proxy.transport.netty.handler.ProxyMessageDecoder;
+import com.proxy.transport.netty.handler.ProxyMessageEncoder;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -30,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <pre>
  * 父 Channel: Http2FrameCodec → Http2MultiplexHandler
  * 子 Channel (每个 Stream):
- *   入站: CipherDecodeHandler → ProxyMessageDecoder → IdleStateHandler → HeartbeatHandler → ServerChannelHandler
+ *   入站: CipherDecodeHandler → ProxyMessageDecoder → IdleStateHandler → HeartbeatHandler → ExchangeHandler
  *   出站: CipherEncodeHandler → ProxyMessageEncoder
  * </pre>
  * </p>
@@ -40,7 +42,8 @@ public class NettyServer implements Server {
     private static final Logger log = LoggerFactory.getLogger(NettyServer.class);
 
     private final URL url;
-    private final Invoker invoker;
+    /** 统一的 Stream Handler（ExchangeHandler），直接挂在每个 stream pipeline 末端 */
+    private final ChannelHandler streamHandler;
     private final AtomicBoolean active = new AtomicBoolean(false);
     private final AtomicInteger connectionCount = new AtomicInteger(0);
 
@@ -48,9 +51,9 @@ public class NettyServer implements Server {
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
 
-    public NettyServer(URL url, Invoker invoker) {
+    public NettyServer(URL url, ChannelHandler streamHandler) {
         this.url = url;
-        this.invoker = invoker;
+        this.streamHandler = streamHandler;
     }
 
     @Override
@@ -103,12 +106,37 @@ public class NettyServer implements Server {
                                             pipeline.addLast("idleState", new IdleStateHandler(
                                                     readIdleTimeout, 0, 0, TimeUnit.SECONDS));
                                             pipeline.addLast("heartbeat", new HeartbeatHandler());
-                                            pipeline.addLast("serverHandler", new ServerChannelHandler(invoker));
+                                            pipeline.addLast("handler", streamHandler);
                                         }
                                     });
 
                             ch.pipeline().addLast("frameCodec", frameCodec);
                             ch.pipeline().addLast("multiplexHandler", multiplexHandler);
+
+                            // 连接建立后增大 connection-level flow control window（与客户端对齐）
+                            // 默认 65535 bytes 太小，大流量场景下会阻塞所有 stream 的上行帧发送
+                            ch.pipeline().addLast("window-update", new ChannelInboundHandlerAdapter() {
+                                @Override
+                                public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+                                    if (evt instanceof Http2ConnectionPrefaceAndSettingsFrameWrittenEvent) {
+                                        Http2FrameCodec codec = ctx.pipeline().get(Http2FrameCodec.class);
+                                        if (codec != null) {
+                                            io.netty.handler.codec.http2.Http2Connection conn = codec.connection();
+                                            int increment = 16 * 1024 * 1024 - 65535; // 增大到 ~16MB
+                                            try {
+                                                conn.local().flowController().incrementWindowSize(
+                                                        conn.connectionStream(), increment);
+                                                ctx.flush();
+                                                log.info("Server: increased connection-level receive window by {} (total ~16MB)", increment);
+                                            } catch (Exception e) {
+                                                log.warn("Server: failed to increment connection window: {}", e.getMessage());
+                                            }
+                                        }
+                                        ctx.pipeline().remove(this);
+                                    }
+                                    super.userEventTriggered(ctx, evt);
+                                }
+                            });
 
                             // 监控连接数
                             ch.closeFuture().addListener(f -> {

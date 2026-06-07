@@ -11,6 +11,10 @@ import com.proxy.common.model.ProxyMessage;
 import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
 import com.proxy.remote.dispatch.DispatchInvoker;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import org.junit.jupiter.api.*;
 
 import java.util.ArrayList;
@@ -36,6 +40,9 @@ class ClientServerIntegrationTest {
     private ExchangeClient client;
     private ExecutorService bizExecutor;
     private int port;
+
+    /** 用于接收推送数据的 streamRegistry */
+    private ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry;
 
     @BeforeEach
     void setUp() {
@@ -69,6 +76,10 @@ class ClientServerIntegrationTest {
         URL clientUrl = new URL("proxy", HOST, port);
         clientUrl.addParameter("cipher", "none");
         client = exchanger.connect(clientUrl);
+
+        // 6. 注入 streamRegistry 用于接收推送
+        streamRegistry = new ConcurrentHashMap<>();
+        client.setStreamRegistry(streamRegistry);
     }
 
     @AfterEach
@@ -104,37 +115,39 @@ class ClientServerIntegrationTest {
     }
 
     /**
-     * 测试用例 2：发送 DATA 流式数据（发后即忘），验证通过 push 回调收到回显数据
+     * 测试用例 2：发送 DATA 流式数据（发后即忘），验证通过推送收到回显数据
      * <p>
-     * 数据面已统一为流式 push：上行数据不生成 requestId/Future，仅依赖 streamId 寻址；
-     * 服务端的回包由 push 回调（requestId=0 + streamId）异步送达。
+     * 数据面已统一为流式推送：上行数据不生成 requestId/Future，仅依赖 streamId 寻址；
+     * 服务端的回包由 ExchangeHandler.handlePush() 按 streamId 路由写回。
+     * 测试中使用 EmbeddedChannel 注册到 streamRegistry 来捕获推送。
      * </p>
      */
     @Test
     void testDataEcho() throws Exception {
         byte[] payload = "Hello, Proxy Server!".getBytes();
+        long streamId = 2L;
 
-        // 注册 push 回调收集服务端推送
-        BlockingQueue<ProxyMessage> pushQueue = new LinkedBlockingQueue<>();
-        client.setPushHandler(pushQueue::offer);
+        // 使用 EmbeddedChannel 模拟浏览器端，注册到 streamRegistry
+        BlockingQueue<byte[]> pushQueue = new LinkedBlockingQueue<>();
+        EmbeddedChannel embeddedChannel = createPushCapture(streamId, pushQueue);
 
         ProxyMessage message = ProxyMessage.builder()
                 .type(ProxyMessage.MessageType.DATA)
                 .host("www.example.com")
                 .port(443)
-                .streamId(2)
+                .streamId(streamId)
                 .data(payload)
                 .build();
 
-        // 发后即忘发送（不返回 Future）
-        client.stream(message);
+        // 发后即忘发送
+        client.send(message);
 
-        // 从 push 回调验证回显数据
-        ProxyMessage pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
+        // 从 EmbeddedChannel 捕获推送数据
+        byte[] pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
         assertNotNull(pushed, "Should receive a server push for the stream");
-        assertEquals(ProxyMessage.MessageType.DATA, pushed.getType());
-        assertEquals(2L, pushed.getStreamId(), "Push should carry the same streamId");
-        assertArrayEquals(payload, pushed.getData(), "Echo data should match");
+        assertArrayEquals(payload, pushed, "Echo data should match");
+
+        embeddedChannel.close();
     }
 
     /**
@@ -153,7 +166,7 @@ class ClientServerIntegrationTest {
         Response response = future.get(TIMEOUT, TimeUnit.MILLISECONDS);
 
         assertNotNull(response);
-        assertTrue(response.isSuccess());
+        assertTrue(response.isSuccess(), "Expected OK response for DISCONNECT");
     }
 
     /**
@@ -166,25 +179,29 @@ class ClientServerIntegrationTest {
      */
     @Test
     void testHeartbeatDoesNotInterfere() throws Exception {
-        // 注册 push 回调
-        BlockingQueue<ProxyMessage> pushQueue = new LinkedBlockingQueue<>();
-        client.setPushHandler(pushQueue::offer);
+        long streamId = 4L;
+        byte[] payload = "test-after-heartbeat".getBytes();
+
+        // 注册推送捕获
+        BlockingQueue<byte[]> pushQueue = new LinkedBlockingQueue<>();
+        EmbeddedChannel embeddedChannel = createPushCapture(streamId, pushQueue);
 
         // 发送正常 DATA 流式数据
-        byte[] payload = "test-after-heartbeat".getBytes();
         ProxyMessage message = ProxyMessage.builder()
                 .type(ProxyMessage.MessageType.DATA)
                 .host("heartbeat-test.com")
                 .port(80)
-                .streamId(4)
+                .streamId(streamId)
                 .data(payload)
                 .build();
 
-        client.stream(message);
+        client.send(message);
 
-        ProxyMessage pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
+        byte[] pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
         assertNotNull(pushed, "Should receive a server push after heartbeat");
-        assertArrayEquals(payload, pushed.getData());
+        assertArrayEquals(payload, pushed);
+
+        embeddedChannel.close();
     }
 
     /**
@@ -194,10 +211,16 @@ class ClientServerIntegrationTest {
     void testConcurrentRequests() throws Exception {
         int concurrency = 100;
 
-        // 按 streamId 收集 push 回显数据，每个 stream 一个队列
-        ConcurrentHashMap<Long, BlockingQueue<ProxyMessage>> pushByStream = new ConcurrentHashMap<>();
-        client.setPushHandler(msg ->
-                pushByStream.computeIfAbsent(msg.getStreamId(), k -> new LinkedBlockingQueue<>()).offer(msg));
+        // 为每个 stream 创建独立的 EmbeddedChannel 和推送队列
+        ConcurrentHashMap<Long, BlockingQueue<byte[]>> pushByStream = new ConcurrentHashMap<>();
+        List<EmbeddedChannel> channels = new ArrayList<>();
+
+        for (int i = 0; i < concurrency; i++) {
+            long streamId = 100 + i;
+            BlockingQueue<byte[]> queue = new LinkedBlockingQueue<>();
+            pushByStream.put(streamId, queue);
+            channels.add(createPushCapture(streamId, queue));
+        }
 
         ExecutorService executor = Executors.newFixedThreadPool(20);
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -222,15 +245,13 @@ class ClientServerIntegrationTest {
                             .build();
 
                     // 发后即忘发送
-                    client.stream(message);
+                    client.send(message);
 
                     // 等待该 stream 的 push 回显
-                    BlockingQueue<ProxyMessage> q =
-                            pushByStream.computeIfAbsent(streamId, k -> new LinkedBlockingQueue<>());
-                    ProxyMessage pushed = q.poll(TIMEOUT, TimeUnit.MILLISECONDS);
+                    BlockingQueue<byte[]> q = pushByStream.get(streamId);
+                    byte[] pushed = q.poll(TIMEOUT, TimeUnit.MILLISECONDS);
 
-                    if (pushed != null && pushed.getStreamId() == streamId &&
-                            java.util.Arrays.equals(payload, pushed.getData())) {
+                    if (pushed != null && java.util.Arrays.equals(payload, pushed)) {
                         successCount.incrementAndGet();
                     } else {
                         failCount.incrementAndGet();
@@ -250,6 +271,9 @@ class ClientServerIntegrationTest {
 
         assertEquals(concurrency, successCount.get(),
                 "All concurrent streams should receive matching push. Failures: " + failCount.get());
+
+        // 清理
+        channels.forEach(EmbeddedChannel::close);
     }
 
     /**
@@ -315,6 +339,30 @@ class ClientServerIntegrationTest {
         server.close();
         assertFalse(server.isActive(), "Server should not be active after close");
         server = null; // 防止 tearDown 再次 close
+    }
+
+    // ==================== 辅助方法 ====================
+
+    /**
+     * 创建一个 EmbeddedChannel 并注册到 streamRegistry，用于捕获推送数据。
+     * 推送到来时，数据会被放入 pushQueue。
+     */
+    private EmbeddedChannel createPushCapture(long streamId, BlockingQueue<byte[]> pushQueue) {
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                if (msg instanceof ByteBuf) {
+                    ByteBuf buf = (ByteBuf) msg;
+                    byte[] data = new byte[buf.readableBytes()];
+                    buf.readBytes(data);
+                    buf.release();
+                    pushQueue.offer(data);
+                }
+            }
+        });
+        // 注册 ctx 到 streamRegistry（ExchangeHandler.handlePush 会按 streamId 查找并写入）
+        streamRegistry.put(streamId, channel.pipeline().lastContext());
+        return channel;
     }
 
     /**

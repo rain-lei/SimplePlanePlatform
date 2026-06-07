@@ -7,7 +7,7 @@ remoteServers:
     cipherKey: your-cipher-key
 cluster: failover
 loadBalance: roundrobin
-timeoutMs: 30000
+timeoutMs: 8000
 connectionsPerNode: 1
 httpProxyEnabled: true
 route:

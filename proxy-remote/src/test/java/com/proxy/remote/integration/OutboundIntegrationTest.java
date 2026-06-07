@@ -12,8 +12,8 @@ import com.proxy.remote.outbound.OutboundConnector;
 import com.proxy.remote.outbound.OutboundSession;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -23,7 +23,6 @@ import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -45,6 +44,7 @@ class OutboundIntegrationTest {
     private DispatchInvoker dispatchInvoker;
     private EventLoopGroup outboundWorkerGroup;
     private int proxyPort;
+    private ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry;
 
     // 模拟的目标 EchoServer
     private EventLoopGroup echoServerBossGroup;
@@ -83,6 +83,10 @@ class OutboundIntegrationTest {
         URL clientUrl = new URL("proxy", HOST, proxyPort);
         clientUrl.addParameter("cipher", "none");
         proxyClient = exchanger.connect(clientUrl);
+
+        // 注入 streamRegistry 用于接收推送
+        streamRegistry = new ConcurrentHashMap<>();
+        proxyClient.setStreamRegistry(streamRegistry);
     }
 
     @AfterEach
@@ -119,9 +123,9 @@ class OutboundIntegrationTest {
         // 等待出站连接建立
         Thread.sleep(200);
 
-        // 注册 push 回调收集 echo 回包（数据面已统一为流式 push）
-        BlockingQueue<ProxyMessage> pushQueue = new LinkedBlockingQueue<>();
-        proxyClient.setPushHandler(pushQueue::offer);
+        // 使用 EmbeddedChannel 捕获 echo 回包
+        BlockingQueue<byte[]> pushQueue = new LinkedBlockingQueue<>();
+        EmbeddedChannel embeddedChannel = createPushCapture(streamId, pushQueue);
 
         // 2. 发送 DATA（发后即忘）
         byte[] payload = "Hello Echo Server!".getBytes();
@@ -132,15 +136,15 @@ class OutboundIntegrationTest {
                 .streamId(streamId)
                 .data(payload)
                 .build();
-        proxyClient.stream(dataMsg);
+        proxyClient.send(dataMsg);
 
         // echo 回包通过 OutboundSession.writeBack 经 inboundCtx 推回客户端，
-        // 客户端经 PushHandler 落地（requestId=0 + streamId + type=DATA）
-        ProxyMessage pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
+        // 客户端经 ExchangeHandler.handlePush() 路由到 streamRegistry 中的 ctx
+        byte[] pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
         assertNotNull(pushed, "Should receive echo data via server push");
-        assertEquals(ProxyMessage.MessageType.DATA, pushed.getType());
-        assertEquals(streamId, pushed.getStreamId());
-        assertArrayEquals(payload, pushed.getData(), "Echo data should match");
+        assertArrayEquals(payload, pushed, "Echo data should match");
+
+        embeddedChannel.close();
     }
 
     /**
@@ -166,8 +170,7 @@ class OutboundIntegrationTest {
         // 等待异步连接失败 → session 被清理
         Thread.sleep(500);
 
-        // 数据面已改为发后即忘，无错误响应可等；
-        // 改为直接验证服务端 session 已被清理（连接失败的副作用）
+        // 直接验证服务端 session 已被清理（连接失败的副作用）
         assertNull(dispatchInvoker.getSessionManager().get(String.valueOf(streamId)),
                 "Session should be cleaned up after outbound connect failure");
     }
@@ -200,7 +203,7 @@ class OutboundIntegrationTest {
         Response disconnectResp = disconnectFuture.get(TIMEOUT, TimeUnit.MILLISECONDS);
         assertTrue(disconnectResp.isSuccess(), "DISCONNECT should succeed");
 
-        // DISCONNECT 后 session 应已被清理（数据面发后即忘，直接验证服务端状态）
+        // DISCONNECT 后 session 应已被清理
         Thread.sleep(100);
         assertNull(dispatchInvoker.getSessionManager().get(String.valueOf(streamId)),
                 "Session should be cleaned up after DISCONNECT");
@@ -224,12 +227,10 @@ class OutboundIntegrationTest {
         Thread.sleep(200);
 
         // 关闭 echo server 的 worker group → 强制断开所有已建立连接
-        // 触发 OutboundHandler.channelInactive → session.close()
         echoServerWorkerGroup.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS).sync();
         Thread.sleep(500);
 
-        // 数据面已改为发后即忘，无错误响应可等；
-        // 改为直接验证目标关闭后服务端 session 已进入 CLOSED 状态
+        // 验证目标关闭后服务端 session 已进入 CLOSED 状态
         OutboundSession session =
                 dispatchInvoker.getSessionManager().get(String.valueOf(streamId));
         assertNotNull(session, "Session entry should still exist before next DATA cleanup");
@@ -294,6 +295,23 @@ class OutboundIntegrationTest {
     }
 
     // ======================== Helper Methods ========================
+
+    private EmbeddedChannel createPushCapture(long streamId, BlockingQueue<byte[]> pushQueue) {
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                if (msg instanceof ByteBuf) {
+                    ByteBuf buf = (ByteBuf) msg;
+                    byte[] data = new byte[buf.readableBytes()];
+                    buf.readBytes(data);
+                    buf.release();
+                    pushQueue.offer(data);
+                }
+            }
+        });
+        streamRegistry.put(streamId, channel.pipeline().lastContext());
+        return channel;
+    }
 
     private void startEchoServer(int port) throws InterruptedException {
         echoServerBossGroup = new NioEventLoopGroup(1);

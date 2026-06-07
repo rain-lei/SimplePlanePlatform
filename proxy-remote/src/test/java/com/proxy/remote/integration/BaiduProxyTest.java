@@ -9,7 +9,11 @@ import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
 import com.proxy.remote.dispatch.DispatchInvoker;
 import com.proxy.remote.outbound.OutboundConnector;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.junit.jupiter.api.*;
 
@@ -37,6 +41,7 @@ class BaiduProxyTest {
     private DispatchInvoker dispatchInvoker;
     private EventLoopGroup outboundWorkerGroup;
     private int proxyPort;
+    private ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -63,6 +68,10 @@ class BaiduProxyTest {
         URL clientUrl = new URL("proxy", HOST, proxyPort);
         clientUrl.addParameter("cipher", "none");
         proxyClient = exchanger.connect(clientUrl);
+
+        // 注入 streamRegistry 用于接收推送
+        streamRegistry = new ConcurrentHashMap<>();
+        proxyClient.setStreamRegistry(streamRegistry);
     }
 
     @AfterEach
@@ -97,14 +106,14 @@ class BaiduProxyTest {
         // 等待出站连接建立
         Thread.sleep(500);
 
-        // 2. 发送 HTTP GET 请求
+        // 2. 发送 HTTP GET 请求（使用 EmbeddedChannel 捕获推送）
         String httpRequest = "GET / HTTP/1.1\r\n" +
                 "Host: www.baidu.com\r\n" +
                 "Connection: close\r\n" +
                 "\r\n";
-        // 数据面已统一为流式 push：注册回调收集百度的响应回包
-        BlockingQueue<ProxyMessage> pushQueue = new LinkedBlockingQueue<>();
-        proxyClient.setPushHandler(pushQueue::offer);
+
+        BlockingQueue<byte[]> pushQueue = new LinkedBlockingQueue<>();
+        EmbeddedChannel embeddedChannel = createPushCapture(streamId, pushQueue);
 
         ProxyMessage dataMsg = ProxyMessage.builder()
                 .type(ProxyMessage.MessageType.DATA)
@@ -114,13 +123,12 @@ class BaiduProxyTest {
                 .data(httpRequest.getBytes(StandardCharsets.UTF_8))
                 .build();
         // 发后即忘发送
-        proxyClient.stream(dataMsg);
+        proxyClient.send(dataMsg);
 
-        // 3. 等待百度响应通过 writeBack 推回（requestId=0 + streamId + type=DATA）
-        ProxyMessage pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
+        // 3. 等待百度响应通过 ExchangeHandler.handlePush() 路由写回
+        byte[] pushed = pushQueue.poll(TIMEOUT, TimeUnit.MILLISECONDS);
         assertNotNull(pushed, "Should receive baidu HTTP response via server push");
-        assertEquals(streamId, pushed.getStreamId());
-        String responseText = new String(pushed.getData(), StandardCharsets.UTF_8);
+        String responseText = new String(pushed, StandardCharsets.UTF_8);
         assertTrue(responseText.contains("HTTP") || responseText.toLowerCase().contains("baidu"),
                 "Response should look like an HTTP reply from baidu, got: "
                         + responseText.substring(0, Math.min(80, responseText.length())));
@@ -146,6 +154,27 @@ class BaiduProxyTest {
 
         assertEquals(0, dispatchInvoker.getSessionManager().activeCount(),
                 "Session should be cleaned after DISCONNECT");
+
+        embeddedChannel.close();
+    }
+
+    // ==================== 辅助方法 ====================
+
+    private EmbeddedChannel createPushCapture(long streamId, BlockingQueue<byte[]> pushQueue) {
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                if (msg instanceof ByteBuf) {
+                    ByteBuf buf = (ByteBuf) msg;
+                    byte[] data = new byte[buf.readableBytes()];
+                    buf.readBytes(data);
+                    buf.release();
+                    pushQueue.offer(data);
+                }
+            }
+        });
+        streamRegistry.put(streamId, channel.pipeline().lastContext());
+        return channel;
     }
 
     private int findAvailablePort() {

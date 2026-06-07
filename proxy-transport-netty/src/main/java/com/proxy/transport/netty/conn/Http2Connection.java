@@ -5,10 +5,8 @@ import com.proxy.common.crypto.CipherConfig;
 import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
 import com.proxy.common.transport.MessageHandler;
-import com.proxy.transport.netty.StreamPipelineCustomizer;
 import com.proxy.transport.netty.handler.CipherDecodeHandler;
 import com.proxy.transport.netty.handler.CipherEncodeHandler;
-import com.proxy.transport.netty.handler.ClientMessageHandler;
 import com.proxy.transport.netty.handler.HeartbeatHandler;
 import com.proxy.transport.netty.handler.ProxyMessageDecoder;
 import com.proxy.transport.netty.handler.ProxyMessageEncoder;
@@ -21,9 +19,11 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http2.DefaultHttp2PingFrame;
 import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
+import io.netty.handler.codec.http2.Http2PingFrame;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
@@ -39,7 +39,6 @@ import io.netty.util.concurrent.Promise;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Executors;
@@ -68,16 +67,20 @@ public class Http2Connection {
     private static final Logger log = LoggerFactory.getLogger(Http2Connection.class);
 
     // 重连相关常量
-    private static final long RECONNECT_INITIAL_DELAY_MS = 1000;
-    private static final long RECONNECT_MAX_DELAY_MS = 60000;
+    // 退避策略调温和：初始 500ms，封顶 5s（原 60s 过于激进，导致网络恢复后仍长时间不可用）
+    private static final long RECONNECT_INITIAL_DELAY_MS = 500;
+    private static final long RECONNECT_MAX_DELAY_MS = 5000;
     private static final double RECONNECT_BACKOFF_MULTIPLIER = 2.0;
+
+    // 主连接级 PING 探活：检测“半开连接”（休眠唤醒 / NAT 超时后 TCP 看似 active 实则对端已失联）
+    // PING 发出后若超过该时长仍未收到 ACK，则判定连接已死并强制重连。
+    private static final long PING_TIMEOUT_MS = 5000;
 
     private final URL url;
     private final Http2ClientConfig config;
     private final EventLoopGroup workerGroup;
     private final Bootstrap bootstrap;
     private final MessageHandler messageHandler;
-    private final List<StreamPipelineCustomizer> pipelineCustomizers;
 
     /** 标记是否用户主动销毁（destroy），主动销毁后不再重连 */
     private final AtomicBoolean destroyed = new AtomicBoolean(false);
@@ -98,6 +101,8 @@ public class Http2Connection {
     private volatile SslContext sslContext;
     private volatile Channel parentChannel;
     private volatile ScheduledFuture<?> healthCheckFuture;
+    /** 主连接 PING 探活：标记当前是否有一个未收到 ACK 的在途 PING。 */
+    private final AtomicBoolean pingPending = new AtomicBoolean(false);
 
     public Http2Connection(URL url, MessageHandler handler) {
         this.url = url;
@@ -105,8 +110,6 @@ public class Http2Connection {
         this.config = Http2ClientConfig.fromUrl(url);
         this.workerGroup = new NioEventLoopGroup(
                 url.getParameter("ioThreads", Runtime.getRuntime().availableProcessors()));
-        this.pipelineCustomizers = loadPipelineCustomizers();
-
         if (config.isSslEnabled()) {
             initSslContext();
         }
@@ -150,6 +153,10 @@ public class Http2Connection {
             return;
         }
         log.warn("HTTP/2 connection to {}:{} lost, scheduling reconnect...", url.getHost(), url.getPort());
+        // 通知 MessageHandler 连接断开，使所有 pending future 立即失败（防止业务线程永久阻塞）
+        if (messageHandler != null) {
+            messageHandler.onDisconnected();
+        }
         scheduleReconnect();
     }
 
@@ -157,6 +164,16 @@ public class Http2Connection {
      * 调度重连任务（指数退避）。
      */
     private void scheduleReconnect() {
+        scheduleReconnect(false);
+    }
+
+    /**
+     * 调度重连任务。
+     *
+     * @param immediate 为 true 时立即重连并重置退避计数（用于健康检查探测到连接已死的场景，
+     *                  避免网络已恢复却还要傻等最多 5s 退避）。
+     */
+    private void scheduleReconnect(boolean immediate) {
         if (destroyed.get()) {
             return;
         }
@@ -165,9 +182,17 @@ public class Http2Connection {
             return;
         }
 
-        int attempt = reconnectAttempts.incrementAndGet();
-        long delay = calculateBackoffDelay(attempt);
-        log.info("Scheduling reconnect attempt #{} in {}ms", attempt, delay);
+        long delay;
+        if (immediate) {
+            // 健康检查确认连接已死：立即重连，退避计数清零
+            reconnectAttempts.set(0);
+            delay = 0;
+            log.info("Scheduling immediate reconnect (connection confirmed dead)");
+        } else {
+            int attempt = reconnectAttempts.incrementAndGet();
+            delay = calculateBackoffDelay(attempt);
+            log.info("Scheduling reconnect attempt #{} in {}ms", attempt, delay);
+        }
 
         scheduler.schedule(this::doReconnect, delay, TimeUnit.MILLISECONDS);
     }
@@ -188,6 +213,7 @@ public class Http2Connection {
                 this.parentChannel = future.channel();
                 this.reconnectAttempts.set(0);
                 this.reconnecting.set(false);
+                this.pingPending.set(false);
                 log.info("Reconnect SUCCESS to {}:{}", url.getHost(), url.getPort());
 
                 // 重新注册关闭监听器
@@ -217,11 +243,16 @@ public class Http2Connection {
 
     /**
      * 启动连接级健康检查。
-     * 每隔 30 秒检测 parentChannel 是否还活着，如果发现断开则主动触发重连。
-     * 这用于检测"半关闭"状态（如休眠唤醒后 TCP 连接已死但 Netty 还未感知）。
+     * 每隔 15 秒检测 parentChannel：
+     * <ul>
+     *   <li>若 channel 已 inactive，立即重连；</li>
+     *   <li>若 channel 看似 active，发送 HTTP/2 PING 主动探活，PING 超时则判定为
+     *       "半开连接"，强制关闭并立即重连（这是修复"请求堆积到 30s 超时"的关键）。</li>
+     * </ul>
      */
     private void startHealthCheck() {
         stopHealthCheck();
+        pingPending.set(false);
         healthCheckFuture = scheduler.scheduleAtFixedRate(() -> {
             if (destroyed.get()) {
                 stopHealthCheck();
@@ -230,9 +261,50 @@ public class Http2Connection {
             Channel ch = parentChannel;
             if (ch == null || !ch.isActive()) {
                 log.warn("Health check: connection inactive, triggering reconnect");
-                scheduleReconnect();
+                scheduleReconnect(true);
+                return;
             }
+            // 连接看似存活：主动 PING 探活，识别半开连接
+            sendHealthPing(ch);
         }, 15, 15, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 在主连接上发送 HTTP/2 PING 帧探活。
+     * 若上一次 PING 仍未收到 ACK（pingPending 仍为 true），说明连接已半开失联，
+     * 强制关闭该连接并立即重连。
+     */
+    private void sendHealthPing(Channel ch) {
+        // 上一轮 PING 还没回 ACK —— 连接已死
+        if (pingPending.get()) {
+            log.warn("Health check: PING not acked within {}ms, connection is half-open, forcing reconnect",
+                    PING_TIMEOUT_MS);
+            pingPending.set(false);
+            try {
+                ch.close();
+            } catch (Exception e) {
+                log.debug("Error closing half-open channel: {}", e.getMessage());
+            }
+            // closeFuture 会触发 onConnectionLost -> scheduleReconnect；这里再补一发立即重连兜底
+            scheduleReconnect(true);
+            return;
+        }
+        pingPending.set(true);
+        try {
+            ch.writeAndFlush(new DefaultHttp2PingFrame(System.nanoTime()))
+                    .addListener(f -> {
+                        if (!f.isSuccess()) {
+                            // 连写都写不出去，直接判死
+                            pingPending.set(false);
+                            log.warn("Health check: failed to send PING, forcing reconnect");
+                            scheduleReconnect(true);
+                        }
+                    });
+        } catch (Exception e) {
+            pingPending.set(false);
+            log.warn("Health check: exception sending PING ({}), forcing reconnect", e.getMessage());
+            scheduleReconnect(true);
+        }
     }
 
     /**
@@ -301,26 +373,11 @@ public class Http2Connection {
                         config.getHeartbeatIntervalSec(),
                         0, TimeUnit.SECONDS));
         ch.pipeline().addLast("heartbeat", new HeartbeatHandler());
-        ch.pipeline().addLast("handler", new ClientMessageHandler(messageHandler));
 
-        for (StreamPipelineCustomizer customizer : pipelineCustomizers) {
-            customizer.customize(ch.pipeline());
-        }
+        // ExchangeHandler 本身即 @Sharable ChannelHandler，直接挂 pipeline
+        ch.pipeline().addLast("handler", (io.netty.channel.ChannelHandler) messageHandler);
     }
 
-    private List<StreamPipelineCustomizer> loadPipelineCustomizers() {
-        try {
-            List<StreamPipelineCustomizer> customizers =
-                    ExtensionLoader.getLoader(StreamPipelineCustomizer.class).getActivateExtensions("");
-            if (!customizers.isEmpty()) {
-                log.info("Loaded {} StreamPipelineCustomizer(s)", customizers.size());
-            }
-            return customizers;
-        } catch (Exception e) {
-            log.debug("No StreamPipelineCustomizer found via SPI (this is normal for server-side)");
-            return java.util.Collections.emptyList();
-        }
-    }
 
     private void initSslContext() {
         try {
@@ -359,6 +416,19 @@ public class Http2Connection {
                                         .initialWindowSize(1024 * 1024))  // 1MB stream window
                                 .build();
                         ch.pipeline().addLast("http2-codec", frameCodec);
+                        // 主连接级 PING ACK 捕获：收到 PING(ack=true) 时复位 pingPending，
+                        // 表示连接探活成功。放在 multiplex 之前，确保 PING 帧不会被当作 Stream 处理。
+                        ch.pipeline().addLast("ping-ack", new io.netty.channel.ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void channelRead(io.netty.channel.ChannelHandlerContext ctx, Object msg) {
+                                if (msg instanceof Http2PingFrame && ((Http2PingFrame) msg).ack()) {
+                                    pingPending.set(false);
+                                    log.debug("Health check: received PING ack, connection alive");
+                                    return; // PING ack 不再向下传递
+                                }
+                                ctx.fireChannelRead(msg);
+                            }
+                        });
                         // 入站（服务端推送）Stream 也使用同一套 pipeline
                         ch.pipeline().addLast("http2-multiplex",
                                 new Http2MultiplexHandler(new ChannelInitializer<Channel>() {

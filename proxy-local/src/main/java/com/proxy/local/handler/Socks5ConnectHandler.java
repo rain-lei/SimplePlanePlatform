@@ -145,7 +145,8 @@ public class Socks5ConnectHandler extends ChannelInboundHandlerAdapter {
                         ctx.pipeline().remove(Socks5ConnectHandler.this);
                         log.info("SOCKS5 direct tunnel established: {}:{}", host, port);
                     } else {
-                        log.warn("SOCKS5 direct connection failed for {}:{}", host, port);
+                        // 失败详情已由 DirectRelayHandler 节流告警，这里降为 debug，避免重试风暴刷屏
+                        log.debug("SOCKS5 direct connection failed for {}:{}", host, port);
                         sendReply(ctx, REP_HOST_UNREACHABLE);
                         ctx.close();
                     }

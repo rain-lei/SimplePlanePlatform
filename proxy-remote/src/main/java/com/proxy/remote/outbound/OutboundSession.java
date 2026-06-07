@@ -85,7 +85,9 @@ public class OutboundSession {
         if (outboundChannel != null && outboundChannel.isActive()) {
             outboundChannel.writeAndFlush(io.netty.buffer.Unpooled.wrappedBuffer(data));
         } else {
-            log.warn("Outbound channel inactive, cannot forward: sessionKey={}", sessionKey);
+            // outbound 已断开，关闭 session 避免无效的后续调用
+            log.info("Outbound channel inactive, closing session: sessionKey={}", sessionKey);
+            close();
         }
     }
 
@@ -114,7 +116,10 @@ public class OutboundSession {
             inboundCtx.writeAndFlush(message);
             log.debug("writeBack: sessionKey={}, dataLen={}", sessionKey, data.length);
         } else {
-            log.warn("Inbound channel inactive, cannot writeBack: sessionKey={}", sessionKey);
+            // 客户端 stream 已断开，主动关闭 outbound 连接，停止从目标网站接收数据
+            log.info("Inbound channel inactive, closing outbound session: sessionKey={}, target={}:{}",
+                    sessionKey, targetHost, targetPort);
+            close();
         }
     }
 

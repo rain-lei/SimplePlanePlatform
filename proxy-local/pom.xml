@@ -119,9 +119,6 @@
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
                                     <resource>META-INF/proxy/com.proxy.common.filter.FilterChainBuilder</resource>
                                 </transformer>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
-                                    <resource>META-INF/proxy/com.proxy.transport.netty.StreamPipelineCustomizer</resource>
-                                </transformer>
                             </transformers>
                         </configuration>
                     </execution>

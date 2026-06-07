@@ -8,6 +8,7 @@ import com.proxy.common.model.ProxyMessage;
 import com.proxy.remote.outbound.OutboundConnector;
 import com.proxy.remote.outbound.OutboundSession;
 import com.proxy.remote.outbound.SessionManager;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 服务端 Filter 链末端的请求分派器
@@ -126,8 +128,12 @@ public class DispatchInvoker implements Invoker {
     /**
      * 处理 CONNECT 请求
      * <p>
-     * 创建 OutboundSession，通过 OutboundConnector 异步建立到目标的 TCP 连接。
-     * 立即返回 OK（不等建连完成），后续 DATA 请求通过 awaitActive 等待连接就绪。
+     * 创建 OutboundSession，通过 OutboundConnector 建立到目标的 TCP 连接。
+     * 同步等待连接建立完成后才返回 Response，确保 DefaultFuture 拿到的响应
+     * 语义为"连接已建立"或"连接失败"，而非仅仅"请求已收到"。
+     * </p>
+     * <p>
+     * 注意：此方法运行在 bizExecutor 线程池中，阻塞等待不会影响 Netty IO 线程。
      * </p>
      */
     private Response handleConnect(Invocation invocation) {
@@ -149,17 +155,18 @@ public class DispatchInvoker implements Invoker {
         OutboundSession session = new OutboundSession(inboundCtx, targetHost, targetPort, sessionKey, rawStreamId);
         sessionManager.register(sessionKey, session);
 
-        // 异步建立到目标的 TCP 连接
-        connector.connect(targetHost, targetPort, session).whenComplete((channel, throwable) -> {
-            if (throwable != null) {
-                log.error("Outbound connect failed: target={}:{}, sessionKey={}", targetHost, targetPort, sessionKey, throwable);
-                sessionManager.remove(sessionKey);
-            } else {
-                session.setOutboundChannel(channel);
-            }
-        });
-
-        return Response.ok();
+        // 同步等待出站连接建立（在 bizExecutor 线程中阻塞，不影响 IO 线程）
+        try {
+            Channel channel = connector.connect(targetHost, targetPort, session)
+                    .get(activeWaitTimeoutMs, TimeUnit.MILLISECONDS);
+            session.setOutboundChannel(channel);
+            log.info("CONNECT success: target={}:{}, sessionKey={}", targetHost, targetPort, sessionKey);
+            return Response.ok();
+        } catch (Exception e) {
+            log.error("CONNECT failed: target={}:{}, sessionKey={}", targetHost, targetPort, sessionKey, e);
+            sessionManager.remove(sessionKey);
+            return Response.error("Connect to " + targetHost + ":" + targetPort + " failed: " + e.getMessage());
+        }
     }
 
     /**
@@ -189,13 +196,13 @@ public class DispatchInvoker implements Invoker {
                         .streamId((Long) rawStreamIdObj)
                         .data(data)
                         .build();
-                // requestId 默认 0：标记为服务端推送，客户端经 PushHandler 落地
+                // requestId 默认 0：标记为服务端推送，客户端经 ExchangeHandler.handlePush() 路由
                 inboundCtx.writeAndFlush(push);
             } else {
                 log.warn("Stub DATA push skipped: inboundCtx unavailable or inactive, streamId={}",
                         rawStreamIdObj);
             }
-            // DATA 为发后即忘，无需 ServerChannelHandler 自动回写响应
+            // DATA 为发后即忘，无需自动回写响应
             return null;
         }
 
@@ -229,7 +236,7 @@ public class DispatchInvoker implements Invoker {
                 data != null ? data.length : 0);
 
         // DATA 为发后即忘：目标的回包由 OutboundSession 经 inboundCtx 主动推送，
-        // 此处无需 ServerChannelHandler 自动回写响应。
+        // 此处无需自动回写响应。
         return null;
     }
 
@@ -237,6 +244,8 @@ public class DispatchInvoker implements Invoker {
      * 处理 DISCONNECT 请求
      * <p>
      * 通过 SessionManager 移除并关闭对应的 OutboundSession。
+     * 同步等待 outbound channel 真正关闭后才返回 Response，
+     * 确保 DefaultFuture 拿到的响应语义为"隧道已断开"。
      * </p>
      */
     private Response handleDisconnect(Invocation invocation) {
@@ -248,7 +257,29 @@ public class DispatchInvoker implements Invoker {
         }
 
         String sessionKey = (String) invocation.getAttachment("streamId");
-        sessionManager.remove(sessionKey);
+        OutboundSession session = sessionManager.remove(sessionKey);
+
+        if (session == null) {
+            // session 已不存在（可能已被异常清理），直接返回 OK
+            log.debug("DISCONNECT but session not found: sessionKey={}", sessionKey);
+            return Response.ok();
+        }
+
+        // 等待 outbound channel 真正关闭
+        Channel outbound = session.getOutboundChannel();
+        if (outbound != null && outbound.isActive()) {
+            try {
+                outbound.close().await(activeWaitTimeoutMs, TimeUnit.MILLISECONDS);
+                log.info("DISCONNECT completed: sessionKey={}, target={}:{}",
+                        sessionKey, invocation.getTargetHost(), invocation.getTargetPort());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("DISCONNECT interrupted: sessionKey={}", sessionKey);
+            }
+        } else {
+            log.info("DISCONNECT completed (channel already inactive): sessionKey={}", sessionKey);
+        }
+
         return Response.ok();
     }
 

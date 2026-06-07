@@ -36,3 +36,7 @@ replay_pid*.log
 
 # === Misc ===
 /tmp/
+
+# === 本地运行临时文件 ===
+proxy-local-console.out
+.claude/
