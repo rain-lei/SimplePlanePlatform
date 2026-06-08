@@ -12,9 +12,14 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.resolver.AddressResolverGroup;
+import io.netty.resolver.dns.DnsAddressResolverGroup;
+import io.netty.resolver.dns.DnsNameResolverBuilder;
+import io.netty.resolver.dns.SingletonDnsServerAddressStreamProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.InetSocketAddress;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -40,6 +45,15 @@ public class DirectRelayHandler extends ChannelInboundHandlerAdapter {
     private static final ConcurrentHashMap<String, AtomicLong> LAST_WARN_AT = new ConcurrentHashMap<>();
     private static final long WARN_THROTTLE_MS = 10000L;
 
+    /**
+     * 可选的自定义 DNS resolver，通过系统属性 proxy.dns.nameservers 配置。
+     * <p>
+     * TUN 模式下系统 DNS 被 FakeDNS 劫持，需要指定真实 DNS 服务器进行解析。
+     * 系统代理模式下不设置此属性，使用系统默认 DNS，完全兼容原有逻辑。
+     * </p>
+     */
+    private static final AddressResolverGroup<?> CUSTOM_RESOLVER = initResolver();
+
     private final String targetHost;
     private final int targetPort;
     private volatile Channel outboundChannel;
@@ -47,6 +61,25 @@ public class DirectRelayHandler extends ChannelInboundHandlerAdapter {
     public DirectRelayHandler(String targetHost, int targetPort) {
         this.targetHost = targetHost;
         this.targetPort = targetPort;
+    }
+
+    /**
+     * 根据系统属性 proxy.dns.nameservers 初始化 Netty DNS resolver。
+     * 格式：逗号分隔的 IP 列表，如 "114.114.114.114,223.5.5.5"。
+     * 未设置时返回 null，表示使用系统默认 DNS。
+     */
+    private static AddressResolverGroup<?> initResolver() {
+        String dnsServers = System.getProperty("proxy.dns.nameservers");
+        if (dnsServers == null || dnsServers.trim().isEmpty()) {
+            return null;
+        }
+        String firstDns = dnsServers.split(",")[0].trim();
+        log.info("DirectRelay using custom DNS resolver: {}", firstDns);
+        InetSocketAddress dnsAddr = new InetSocketAddress(firstDns, 53);
+        return new DnsAddressResolverGroup(
+                new DnsNameResolverBuilder()
+                        .channelType(io.netty.channel.socket.nio.NioDatagramChannel.class)
+                        .nameServerProvider(new SingletonDnsServerAddressStreamProvider(dnsAddr)));
     }
 
     /**
@@ -83,6 +116,11 @@ public class DirectRelayHandler extends ChannelInboundHandlerAdapter {
                         ch.pipeline().addLast(new BackendHandler(browserCtx));
                     }
                 });
+
+        // TUN 模式下使用自定义 DNS resolver 绕过 FakeDNS
+        if (CUSTOM_RESOLVER != null) {
+            b.resolver(CUSTOM_RESOLVER);
+        }
 
         ChannelFuture connectFuture = b.connect(targetHost, targetPort);
         connectFuture.addListener((ChannelFutureListener) future -> {
