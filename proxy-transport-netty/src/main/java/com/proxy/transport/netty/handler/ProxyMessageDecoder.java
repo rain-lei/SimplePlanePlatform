@@ -186,6 +186,17 @@ public class ProxyMessageDecoder extends ChannelInboundHandlerAdapter {
         super.handlerRemoved(ctx);
     }
 
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        // 解码异常时释放未消耗的 permit，防止背压信用泄漏
+        releasePendingPermits();
+        if (cumulation != null) {
+            cumulation.release();
+            cumulation = null;
+        }
+        super.exceptionCaught(ctx, cause);
+    }
+
     private void releasePendingPermits() {
         for (FlowPermit p : pendingPermits) {
             p.release();
