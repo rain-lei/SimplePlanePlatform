@@ -33,7 +33,7 @@ public final class FlowPermit {
     private final Runnable onRelease;
     private final AtomicBoolean consumed = new AtomicBoolean(false);
 
-    FlowPermit(Runnable onRelease) {
+    public FlowPermit(Runnable onRelease) {
         this.onRelease = onRelease;
     }
 
