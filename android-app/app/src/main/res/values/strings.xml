@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SimplePlane</string>
+    <string name="toggle_vpn">连接 / 断开 VPN</string>
+    <string name="native_version_label">native 版本: %1$s</string>
+    <string name="vpn_status_idle">未连接</string>
+    <string name="notification_channel_name">VPN 状态</string>
+</resources>

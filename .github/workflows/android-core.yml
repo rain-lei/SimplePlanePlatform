@@ -1,0 +1,166 @@
+# Android 客户端 CI（Task Q3）
+#
+# 在 GitHub Actions 上把 Rust 数据面（plane-core）的质量门禁与 Android APK 构建跑成
+# 自动护栏。当前阶段（A1~A4 已完成，A5 出站层尚未实现）的落地范围：
+#
+#   - job: rust-test    —— cargo fmt --check + clippy -D warnings + cargo test（强制门禁）
+#                          覆盖率（cargo-llvm-cov）当前为「信息性」，不阻断；
+#                          待 A5 出站层完成、整体代码量稳定后，再把 --fail-under-lines 80 打开。
+#   - job: android-build—— 交叉编译 plane-core 为各 ABI 的 .so（cargo-ndk）+ assembleDebug，
+#                          产出 debug APK 作为 artifact 上传（满足「可上传打包」目标）。
+#   - job: interop      —— 跨语言协议互通（依赖 Q2 harness + A5 出站层），当前阶段尚不具备，
+#                          以 `if: false` 占位禁用，待 A5/Q2 落地后启用（见下方 TODO）。
+#
+# 触发：push 到任意分支 + 针对 main/master 的 PR。
+# 仅当 Rust/Android/CI 相关路径变更时触发，避免纯 Java 后端改动也跑 Android CI。
+
+name: android-core
+
+on:
+  push:
+    paths:
+      - "plane-core/**"
+      - "android-app/**"
+      - "scripts/build-rust.sh"
+      - ".github/workflows/android-core.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "plane-core/**"
+      - "android-app/**"
+      - "scripts/build-rust.sh"
+      - ".github/workflows/android-core.yml"
+
+# 同一分支/PR 的新提交自动取消上一次未完成的运行，省资源。
+concurrency:
+  group: android-core-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # plane-core 是独立 crate（仓库根下无 workspace Cargo.toml），命令统一在该目录执行。
+  CRATE_DIR: plane-core
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Rust 数据面：格式 / 静态检查 / 单测（强制门禁）+ 覆盖率（信息性）
+  # ---------------------------------------------------------------------------
+  rust-test:
+    name: Rust 数据面（fmt / clippy / test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链（含 clippy / rustfmt）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: 缓存 cargo registry 与 target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.CRATE_DIR }}
+
+      - name: cargo fmt --check
+        working-directory: ${{ env.CRATE_DIR }}
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        working-directory: ${{ env.CRATE_DIR }}
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: ${{ env.CRATE_DIR }}
+        run: cargo test --all-targets
+
+      # 覆盖率：当前为信息性输出，不阻断 CI。
+      # TODO(A5)：A5 出站层（crypto/proxy_proto/outbound）落地、整体代码量稳定后，
+      #           把下面一步改为：cargo llvm-cov --fail-under-lines 80（达成 Q3 ≥80% 门禁）。
+      - name: 安装 cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: cargo llvm-cov（信息性，不阻断）
+        working-directory: ${{ env.CRATE_DIR }}
+        run: cargo llvm-cov --summary-only || true
+
+  # ---------------------------------------------------------------------------
+  # Android 构建：cargo-ndk 交叉编译 .so + assembleDebug，产出 APK artifact
+  # ---------------------------------------------------------------------------
+  android-build:
+    name: Android 构建（cargo-ndk + assembleDebug）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17（Gradle / AGP 要求）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 安装 Android SDK / 命令行工具
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 Android NDK r26（cargo-ndk 交叉编译需要）
+        run: |
+          sdkmanager --install "ndk;26.3.11579264"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: 安装 Rust 工具链 + Android 目标三元组
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: 缓存 cargo registry 与 target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.CRATE_DIR }}
+
+      - name: 安装 cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android-app/**/*.gradle*', 'android-app/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: 交叉编译 plane-core 为各 ABI 的 .so（release）
+        run: bash scripts/build-rust.sh release
+
+      # preBuild 已 dependsOn buildRust（见 app/build.gradle.kts），CI 已在上一步手动编过 .so，
+      # 这里用 -PskipRustBuild=true 避免 Gradle 再触发一次（也避免环境差异导致重复失败）。
+      - name: 构建 Debug APK（assembleDebug）
+        working-directory: android-app
+        run: ./gradlew assembleDebug -PskipRustBuild=true --stacktrace
+
+      - name: 上传 Debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleplane-debug-apk
+          path: android-app/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 协议互通（Q2 harness + A5 出站层）—— 当前阶段尚未实现，占位禁用。
+  # TODO(A5/Q2)：A5 出站层（ProxyMessage + ChaCha20-Poly1305 + HTTP/2）与
+  #              Q2 互通 harness（interop.rs + Java proxy-remote service container）
+  #              完成后，把下方 `if: false` 去掉并补全步骤，达成 Q3 三 job 全绿门禁。
+  # ---------------------------------------------------------------------------
+  interop:
+    name: 协议互通（A5/Q2 落地后启用）
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: 占位
+        run: echo "interop job 待 A5 出站层与 Q2 互通 harness 完成后启用"

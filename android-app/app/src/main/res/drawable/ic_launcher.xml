@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  全版本（含 API 24/25）可用的启动图标回退：纯矢量，蓝底白色纸飞机。
+  API 26+ 设备会优先使用 mipmap-anydpi-v26/ic_launcher.xml 的自适应图标。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,54 L78,34 L58,78 L52,60 Z" />
+</vector>
