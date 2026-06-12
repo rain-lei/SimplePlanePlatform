@@ -84,27 +84,54 @@ pub struct OutboundConfig {
     pub tls: bool,
 }
 
+/// 密文长度前缀字节数（4 字节大端），对齐 Java `CipherEncodeHandler` / `CipherDecodeHandler`。
+pub const CIPHER_LENGTH_PREFIX: usize = 4;
+
 /// 出站方向的「ProxyMessage → 一个加密 DATA 帧负载」编码器（对照 Java
 /// `ProxyMessageEncoder` + `CipherEncodeHandler` 的 DATA 帧部分）。
 ///
 /// 注意：HEADERS 帧由 [`OutboundConnection::open_proxy_stream`] 在 stream 首帧单独发送且
 /// **不加密**，不在此函数内。
+///
+/// ## 长度前缀分帧（与 Java 端对称，2026-06 修复）
+///
+/// 输出格式：`[4字节密文总长度(大端)][nonce|ciphertext|tag]`。
+///
+/// 起因：HTTP/2 不保证 DATA 帧边界与发送侧一一对应（受 maxFrameSize=16KB、流控、合帧
+/// 影响）。大流量传输时一个加密块会被 h2 重新切分到多帧，接收侧若按「单帧 == 单密文块」
+/// 解密就会因密文不完整导致 Poly1305 认证失败、连接被关，表现为吞吐近乎为 0。
+/// 加 4 字节长度前缀后，接收侧（[`InboundReassembler`]）可在密文层累积字节并按长度精确
+/// 切出完整密文块，彻底摆脱对帧边界的依赖。Java 端 `CipherEncodeHandler` 已做同样改造。
 pub fn encode_encrypted_frame(cipher: &Cipher, msg: &ProxyMessage) -> Result<Vec<u8>> {
     let plaintext = msg.encode(); // 28B 明文头 + host + data
     let ciphertext = cipher.encrypt(&plaintext)?; // 对整段明文加密 → nonce|ct|tag
-    Ok(ciphertext)
+
+    // 长度前缀分帧：[4字节密文总长度(大端)][nonce|ct|tag]
+    let mut framed = Vec::with_capacity(CIPHER_LENGTH_PREFIX + ciphertext.len());
+    framed.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&ciphertext);
+    Ok(framed)
 }
 
 /// 入站方向的解密 + 切包累积器（对照 Java `CipherDecodeHandler` + `ProxyMessageDecoder`）。
 ///
-/// 每个收到的 HTTP/2 DATA 帧整体调用 [`Cipher::decrypt`] 得到一段明文，追加进内部缓冲，
-/// 再用 [`proxy_proto::try_decode_one`] 反复切出完整 [`ProxyMessage`]（处理粘包/拆包）。
+/// ## 两级累积（与 Java 端对称，2026-06 修复）
 ///
-/// 抽离为独立结构体便于单测「不依赖真实网络」地验证 decrypt→切包 的完整语义。
+/// 收到的 HTTP/2 DATA 帧字节先进**密文层累积缓冲** [`cipher_buffer`](Self::cipher_buffer)，
+/// 因为 HTTP/2 不保证帧边界与发送侧一一对应（受 maxFrameSize/流控/合帧影响），一个加密块
+/// 可能被拆到多帧、或多个加密块被合到一帧。发送侧（[`encode_encrypted_frame`]）在每个密文块
+/// 前写入 4 字节大端长度，本结构据此循环「读 4 字节长度 → 够长就切出一个完整密文块 decrypt
+/// → 不够就等下一帧」，得到的明文再进**明文层累积缓冲** [`plain_buffer`](Self::plain_buffer)，
+/// 最后用 [`proxy_proto::try_decode_one`] 反复切出完整 [`ProxyMessage`]（处理 ProxyMessage
+/// 级别的粘包/拆包）。
+///
+/// 抽离为独立结构体便于单测「不依赖真实网络」地验证 累积→解密→切包 的完整语义。
 pub struct InboundReassembler {
     cipher: Cipher,
+    /// 尚未凑成完整密文块（[4字节长度][密文]）的剩余字节累积缓冲。
+    cipher_buffer: Vec<u8>,
     /// 已解密但尚未切出完整消息的明文累积缓冲。
-    buffer: Vec<u8>,
+    plain_buffer: Vec<u8>,
 }
 
 impl InboundReassembler {
@@ -112,37 +139,75 @@ impl InboundReassembler {
     pub fn new(cipher: Cipher) -> Self {
         Self {
             cipher,
-            buffer: Vec::new(),
+            cipher_buffer: Vec::new(),
+            plain_buffer: Vec::new(),
         }
     }
 
     /// 处理一个收到的（已加密的）DATA 帧负载：
     ///
-    /// 1. 整帧 `decrypt` 还原明文（对齐 Java 每个 DATA 帧独立解密）；
-    /// 2. 明文追加进累积缓冲；
+    /// 1. 帧字节追加进密文层累积缓冲；
+    /// 2. 循环按 4 字节大端长度切出完整密文块，逐块 `decrypt` 还原明文追加进明文缓冲；
     /// 3. 反复 `try_decode_one` 切出所有当前可解析的完整 [`ProxyMessage`]。
     ///
-    /// 返回本次切出的全部消息（可能为 0 条——半条消息会留在缓冲等下一帧）。
+    /// 返回本次切出的全部消息（可能为 0 条——半个密文块或半条消息会留在缓冲等下一帧）。
     pub fn push_encrypted_frame(&mut self, frame: &[u8]) -> Result<Vec<ProxyMessage>> {
-        let plaintext = self.cipher.decrypt(frame)?;
-        self.buffer.extend_from_slice(&plaintext);
+        // (1) 帧字节进密文层累积缓冲。
+        self.cipher_buffer.extend_from_slice(frame);
+
+        // (2) 按长度前缀循环切出完整密文块并解密。
+        let mut offset = 0usize;
+        while self.cipher_buffer.len() - offset >= CIPHER_LENGTH_PREFIX {
+            // 读 4 字节大端长度（不前移，长度不够时回退等待）。
+            let len_bytes = &self.cipher_buffer[offset..offset + CIPHER_LENGTH_PREFIX];
+            let ct_len = u32::from_be_bytes([
+                len_bytes[0],
+                len_bytes[1],
+                len_bytes[2],
+                len_bytes[3],
+            ]) as usize;
+
+            if self.cipher_buffer.len() - offset < CIPHER_LENGTH_PREFIX + ct_len {
+                // 本密文块还没收齐，等下一帧。
+                break;
+            }
+
+            // 切出完整密文块并解密。
+            let start = offset + CIPHER_LENGTH_PREFIX;
+            let end = start + ct_len;
+            let plaintext = self.cipher.decrypt(&self.cipher_buffer[start..end])?;
+            self.plain_buffer.extend_from_slice(&plaintext);
+            offset = end;
+        }
+
+        // 丢弃已消费的密文字节。
+        if offset > 0 {
+            self.cipher_buffer.drain(..offset);
+        }
+
+        // (3) 明文层切包。
         self.drain_messages()
     }
 
-    /// 从累积缓冲反复切包，移除已消费字节。
+    /// 从明文累积缓冲反复切包，移除已消费字节。
     fn drain_messages(&mut self) -> Result<Vec<ProxyMessage>> {
         let mut out = Vec::new();
         // 反复切出完整消息；不足一条完整消息（try_decode_one 返回 None）时停止，等更多字节。
-        while let Some((msg, consumed)) = proxy_proto::try_decode_one(&self.buffer)? {
+        while let Some((msg, consumed)) = proxy_proto::try_decode_one(&self.plain_buffer)? {
             out.push(msg);
-            self.buffer.drain(..consumed);
+            self.plain_buffer.drain(..consumed);
         }
         Ok(out)
     }
 
-    /// 当前缓冲中尚未切出的字节数（用于测试 / 诊断）。
+    /// 当前明文缓冲中尚未切出的字节数（用于测试 / 诊断）。
     pub fn buffered_len(&self) -> usize {
-        self.buffer.len()
+        self.plain_buffer.len()
+    }
+
+    /// 当前密文缓冲中尚未凑成完整块的字节数（用于测试 / 诊断）。
+    pub fn cipher_buffered_len(&self) -> usize {
+        self.cipher_buffer.len()
     }
 }
 
@@ -416,11 +481,15 @@ mod tests {
         let cipher = test_cipher();
         let msg = ProxyMessage::connect(42, "example.com", 443);
         let frame = encode_encrypted_frame(&cipher, &msg).unwrap();
-        // 加密帧 = nonce(12) + ct + tag(16)，长度 = 明文 + 28。
+        // 加密帧 = 4字节长度前缀 + nonce(12) + ct + tag(16)，长度 = 明文 + 4 + 28。
         let plaintext = msg.encode();
-        assert_eq!(frame.len(), plaintext.len() + 12 + 16);
-        // 解密还原应等于原明文。
-        let restored = cipher.decrypt(&frame).unwrap();
+        assert_eq!(frame.len(), CIPHER_LENGTH_PREFIX + plaintext.len() + 12 + 16);
+        // 校验长度前缀 == 后续密文块长度。
+        let ct_len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+        assert_eq!(ct_len, plaintext.len() + 12 + 16);
+        assert_eq!(frame.len(), CIPHER_LENGTH_PREFIX + ct_len);
+        // 剥掉长度前缀后解密还原应等于原明文。
+        let restored = cipher.decrypt(&frame[CIPHER_LENGTH_PREFIX..]).unwrap();
         assert_eq!(restored, plaintext);
         // 再过 proxy_proto 解码应还原原消息。
         let decoded = ProxyMessage::decode(&restored).unwrap();
@@ -439,9 +508,17 @@ mod tests {
         assert_eq!(re.buffered_len(), 0);
     }
 
+    /// 把裸密文块包装成带 4 字节大端长度前缀的线上帧格式。
+    fn frame_with_prefix(ciphertext: &[u8]) -> Vec<u8> {
+        let mut framed = Vec::with_capacity(CIPHER_LENGTH_PREFIX + ciphertext.len());
+        framed.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+        framed.extend_from_slice(ciphertext);
+        framed
+    }
+
     #[test]
     fn reassembler_multiple_messages_in_one_frame() {
-        // 同一加密帧内含多条 ProxyMessage（明文拼接后整体加密）。
+        // 同一加密块内含多条 ProxyMessage（明文拼接后整体加密）。
         let cipher = test_cipher();
         let m1 = ProxyMessage::data(1, b"first");
         let m2 = ProxyMessage::connect(1, "a.com", 80);
@@ -450,33 +527,54 @@ mod tests {
         plaintext.extend_from_slice(&m1.encode());
         plaintext.extend_from_slice(&m2.encode());
         plaintext.extend_from_slice(&m3.encode());
-        let frame = cipher.encrypt(&plaintext).unwrap();
+        // 整体加密为一个密文块，再加 4 字节长度前缀构成线上帧。
+        let frame = frame_with_prefix(&cipher.encrypt(&plaintext).unwrap());
 
         let mut re = InboundReassembler::new(cipher.clone());
         let got = re.push_encrypted_frame(&frame).unwrap();
         assert_eq!(got, vec![m1, m2, m3]);
         assert_eq!(re.buffered_len(), 0);
+        assert_eq!(re.cipher_buffered_len(), 0);
     }
 
     #[test]
-    fn reassembler_message_split_across_two_frames() {
-        // 一条消息的明文被切成两段，分别独立加密成两个 DATA 帧（跨帧重组）。
+    fn reassembler_ciphertext_block_split_across_two_frames() {
+        // 关键场景：单个密文块（含 4 字节长度前缀）在 HTTP/2 传输中被
+        // 重新切分成两个 DATA 帧。接收侧必须在密文层做字节级累积，
+        // 集齐整块后再解密。这正是修复前会触发 Poly1305 tag 失败的场景。
         let cipher = test_cipher();
         let msg = ProxyMessage::data(7, b"a-reasonably-long-payload-spanning-frames");
-        let plaintext = msg.encode();
-        let split = plaintext.len() / 2;
-
-        let frame1 = cipher.encrypt(&plaintext[..split]).unwrap();
-        let frame2 = cipher.encrypt(&plaintext[split..]).unwrap();
+        // 一条消息整体加密成一个密文块，加 4 字节长度前缀。
+        let frame = frame_with_prefix(&cipher.encrypt(&msg.encode()).unwrap());
+        let split = frame.len() / 2;
+        let (part1, part2) = frame.split_at(split);
 
         let mut re = InboundReassembler::new(cipher.clone());
-        // 第一帧解密后不足一条完整消息 → 0 条，缓冲非空。
-        let got1 = re.push_encrypted_frame(&frame1).unwrap();
+        // 第一帧只到一半 → 密文块不完整，无法解密，产出 0 条，密文缓冲非空。
+        let got1 = re.push_encrypted_frame(part1).unwrap();
         assert!(got1.is_empty());
-        assert_eq!(re.buffered_len(), split);
-        // 第二帧补齐 → 切出完整消息，缓冲清空。
-        let got2 = re.push_encrypted_frame(&frame2).unwrap();
+        assert_eq!(re.cipher_buffered_len(), split);
+        assert_eq!(re.buffered_len(), 0);
+        // 第二帧补齐整块 → 解密成功，切出完整消息，两级缓冲均清空。
+        let got2 = re.push_encrypted_frame(part2).unwrap();
         assert_eq!(got2, vec![msg]);
+        assert_eq!(re.cipher_buffered_len(), 0);
+        assert_eq!(re.buffered_len(), 0);
+    }
+
+    #[test]
+    fn reassembler_two_blocks_coalesced_in_one_frame() {
+        // 两个独立密文块（各带长度前缀）在一个 DATA 帧里被合并送达。
+        let cipher = test_cipher();
+        let m1 = ProxyMessage::data(1, b"alpha");
+        let m2 = ProxyMessage::data(2, b"bravo");
+        let mut frame = encode_encrypted_frame(&cipher, &m1).unwrap();
+        frame.extend_from_slice(&encode_encrypted_frame(&cipher, &m2).unwrap());
+
+        let mut re = InboundReassembler::new(cipher.clone());
+        let got = re.push_encrypted_frame(&frame).unwrap();
+        assert_eq!(got, vec![m1, m2]);
+        assert_eq!(re.cipher_buffered_len(), 0);
         assert_eq!(re.buffered_len(), 0);
     }
 
@@ -485,8 +583,8 @@ mod tests {
         let cipher = test_cipher();
         let msg = ProxyMessage::data(1, b"payload");
         let mut frame = encode_encrypted_frame(&cipher, &msg).unwrap();
-        // 篡改密文 → 解密时 tag 校验失败。
-        let mid = frame.len() / 2;
+        // 篡改密文区（跳过 4 字节长度前缀）→ 解密时 Poly1305 tag 校验失败。
+        let mid = CIPHER_LENGTH_PREFIX + (frame.len() - CIPHER_LENGTH_PREFIX) / 2;
         frame[mid] ^= 0xFF;
         let mut re = InboundReassembler::new(cipher);
         assert!(re.push_encrypted_frame(&frame).is_err());
