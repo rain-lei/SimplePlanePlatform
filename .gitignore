@@ -29,6 +29,8 @@ logs/
 *.p12
 *.jks
 *.keystore
+# Android 签名密码配置（含明文密码，绝不入库）
+keystore.properties
 
 # === JVM ===
 hs_err_pid*.log

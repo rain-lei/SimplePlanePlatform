@@ -1,9 +1,34 @@
 import org.gradle.api.tasks.Exec
+import java.io.FileInputStream
+import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// ---------------------------------------------------------------------------
+// Release 签名材料解析（按优先级，缺失时优雅降级，不影响 debug 构建）：
+//   1. 环境变量（CI 用：ANDROID_KEYSTORE_PATH/PASSWORD、ANDROID_KEY_ALIAS/PASSWORD）
+//   2. 项目根的 keystore.properties（本地用，已在 .gitignore 中排除，不入库）
+// 三者都缺失时 releaseSigning 为 null，assembleRelease 退回 unsigned 产物。
+// ---------------------------------------------------------------------------
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) {
+        FileInputStream(keystorePropsFile).use { load(it) }
+    }
+}
+
+fun signingValue(envKey: String, propKey: String): String? =
+    (System.getenv(envKey)?.takeIf { it.isNotBlank() })
+        ?: (keystoreProps.getProperty(propKey)?.takeIf { it.isNotBlank() })
+
+val ksPath = signingValue("ANDROID_KEYSTORE_PATH", "storeFile")
+val ksPassword = signingValue("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+val ksAlias = signingValue("ANDROID_KEY_ALIAS", "keyAlias")
+val ksKeyPassword = signingValue("ANDROID_KEY_PASSWORD", "keyPassword")
+val hasReleaseSigning = ksPath != null && ksPassword != null && ksAlias != null && ksKeyPassword != null
 
 android {
     namespace = "com.proxy.android"
@@ -24,6 +49,21 @@ android {
         }
     }
 
+    // 仅当签名材料齐备时才注册 release 签名配置；否则不注册，release 退回 unsigned。
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                // ksPath 支持绝对路径或相对仓库根目录的路径。
+                storeFile = rootProject.file(ksPath!!)
+                storePassword = ksPassword
+                keyAlias = ksAlias
+                keyPassword = ksKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -31,6 +71,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // 有签名材料则签名，输出可直接安装的 app-release.apk；
+            // 无材料时保持 unsigned（app-release-unsigned.apk），不阻断构建。
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn("[signing] 未找到 release 签名材料，将产出 unsigned APK。")
+                null
+            }
         }
     }
 

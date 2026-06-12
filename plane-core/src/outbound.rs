@@ -160,12 +160,9 @@ impl InboundReassembler {
         while self.cipher_buffer.len() - offset >= CIPHER_LENGTH_PREFIX {
             // 读 4 字节大端长度（不前移，长度不够时回退等待）。
             let len_bytes = &self.cipher_buffer[offset..offset + CIPHER_LENGTH_PREFIX];
-            let ct_len = u32::from_be_bytes([
-                len_bytes[0],
-                len_bytes[1],
-                len_bytes[2],
-                len_bytes[3],
-            ]) as usize;
+            let ct_len =
+                u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
+                    as usize;
 
             if self.cipher_buffer.len() - offset < CIPHER_LENGTH_PREFIX + ct_len {
                 // 本密文块还没收齐，等下一帧。
@@ -483,7 +480,10 @@ mod tests {
         let frame = encode_encrypted_frame(&cipher, &msg).unwrap();
         // 加密帧 = 4字节长度前缀 + nonce(12) + ct + tag(16)，长度 = 明文 + 4 + 28。
         let plaintext = msg.encode();
-        assert_eq!(frame.len(), CIPHER_LENGTH_PREFIX + plaintext.len() + 12 + 16);
+        assert_eq!(
+            frame.len(),
+            CIPHER_LENGTH_PREFIX + plaintext.len() + 12 + 16
+        );
         // 校验长度前缀 == 后续密文块长度。
         let ct_len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
         assert_eq!(ct_len, plaintext.len() + 12 + 16);

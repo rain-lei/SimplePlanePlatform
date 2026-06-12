@@ -1,13 +1,14 @@
 # SimplePlanePlatform
 
-基于 Dubbo 微内核思想设计的高性能加密隧道代理框架，支持 SOCKS5/HTTP CONNECT 代理模式和 TUN 全局透明代理模式。全链路 SPI 可插拔，集群容错、负载均衡、加密算法、传输层实现均可独立扩展替换。
+基于 Dubbo 微内核思想设计的高性能加密隧道代理框架，支持 SOCKS5/HTTP CONNECT 代理模式和 TUN 全局透明代理模式，并提供基于系统 VpnService 的 Android 客户端。全链路 SPI 可插拔，集群容错、负载均衡、加密算法、传输层实现均可独立扩展替换。
 
 ## 项目定位
 
-将 Dubbo 经典的微内核 + 插件化架构应用到网络代理场景。支持两种工作模式：
+将 Dubbo 经典的微内核 + 插件化架构应用到网络代理场景。支持三种使用形态：
 
 - **代理模式（SOCKS5 / HTTP CONNECT）**：应用程序主动通过代理端口转发流量，适合浏览器/命令行等可配置代理的场景。
 - **TUN 模式（全局透明代理）**：通过虚拟网卡劫持系统全部流量，配合 FakeDNS 实现应用程序无感知的全局代理，无需逐个配置。
+- **Android 客户端**：基于系统 `VpnService` 建立 TUN，经 JNI 调用 Rust 数据面（`plane-core`）完成 FakeDNS、域名路由与 ChaCha20 加密隧道，与桌面端服务器（proxy-remote）协议、加密完全互通。
 
 ## 架构总览
 
@@ -92,6 +93,9 @@ SimplePlanePlatform/
 ├── proxy-local             本地客户端：SOCKS5/HTTP CONNECT 双协议、路由分流、系统代理
 ├── proxy-remote            远程服务端：请求分发、出站连接管理、nginx 部署脚本
 ├── tun-adapter             TUN 透明代理：Rust 实现，smoltcp 协议栈 + FakeDNS + 域名路由
+├── plane-core              Android 数据面：Rust JNI 库（libplane_core.so），用户态栈 + FakeDNS + 出站加密隧道
+├── android-app             Android 客户端：Kotlin VpnService + JNI 桥接，gradle 构建 APK
+├── scripts/build-rust.sh   cargo-ndk 交叉编译 plane-core 为各 ABI 的 .so 并写入 jniLibs
 ├── dashboard               Web 管理面板：可视化管理服务启停、配置编辑、日志查看
 ├── start-tun.sh            TUN 模式一键启动脚本 (macOS)
 ├── start-tun.ps1           TUN 模式一键启动脚本 (Windows PowerShell)
@@ -107,11 +111,12 @@ SimplePlanePlatform/
 |------|------|------|
 | JDK | 1.8+ | 编译运行 proxy-local / proxy-remote |
 | Maven | 3.6+ | Java 项目构建 |
-| Rust | stable（1.70+） | 编译 tun-adapter |
+| Rust | stable（1.70+） | 编译 tun-adapter / plane-core |
 | Node.js | 14+ | 运行 Web Dashboard（零外部依赖，无需 npm install） |
 | macOS | 10.15+ | TUN 模式（需要 root 权限） |
 | Windows | 10 1903+ | TUN 模式（需要管理员权限，WinTUN 驱动随 tun2 crate 内置） |
 | 云服务器 | 公网 IP | 部署 proxy-remote |
+| Android | 7.0+（API 24） | Android 客户端（构建需 JDK 17 + Android SDK/NDK + cargo-ndk） |
 
 ### 编译打包
 
@@ -363,6 +368,119 @@ Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ResetServerAddresses
 route delete 198.18.0.0
 ```
 
+## 使用方式三：Android 客户端
+
+Android 客户端把整套加密隧道带到手机端：基于系统 `VpnService` 建立 TUN，应用全部流量经虚拟网卡进入用户态栈，由 Rust 数据面（`plane-core`，编译为 `libplane_core.so`）完成 FakeDNS 解析、域名路由判断与 ChaCha20 加密，再通过 HTTP/2 隧道转发到 proxy-remote。与桌面端共用同一套 ProxyMessage 协议与 ChaCha20-Poly1305 加密格式，两端完全互通。
+
+### 架构
+
+```
+┌──────────────┐  全部流量   ┌──────────────────────────────────────────────┐
+│  Android App  │ ─────────→ │     PlaneVpnService (Kotlin, VpnService)     │
+│  (任意应用)   │   TUN fd   │  establish() → detachFd() 移交 native        │
+└──────────────┘            └───────────────────┬──────────────────────────┘
+                                                 │ JNI (NativeBridge)
+                                                 ▼
+                            ┌──────────────────────────────────────────────┐
+                            │       plane-core (Rust, libplane_core.so)    │
+                            │  用户态栈 → FakeDNS → 域名路由 → ChaCha20     │
+                            │  回调 protect(fd) 把出站 socket 排除出 TUN    │
+                            └───────────────────┬──────────────────────────┘
+                                                 │ HTTP/2 加密隧道
+                                                 ▼
+                            ┌──────────────────────────────────────────────┐
+                            │            proxy-remote (远程服务器)          │
+                            └──────────────────────────────────────────────┘
+```
+
+Kotlin 侧 `PlaneVpnService` 负责申请 VPN 授权、配置 TUN（地址/路由/DNS/MTU）并把 fd 移交给 native；`NativeBridge` 是 JNI 桥接，向上调用 `nativeStart` / `nativeStop`，向下接收 Rust 的 `protect`（防回环，把出站 socket 排除出 TUN）与 `onStatus`（状态上报）回调。
+
+### 构建环境
+
+| 组件 | 要求 |
+|------|------|
+| JDK | 17（Gradle / AGP 要求，注意与服务端的 JDK 8 区分） |
+| Android SDK | API 34（compileSdk） |
+| Android NDK | r26+（cargo-ndk 交叉编译需要） |
+| Rust target | `aarch64-linux-android` / `armv7-linux-androideabi` / `x86_64-linux-android` |
+| cargo-ndk | `cargo install cargo-ndk` |
+
+首次准备工具链：
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+cargo install cargo-ndk
+# 并通过 ANDROID_NDK_HOME 或 sdkmanager 安装 NDK r26+
+```
+
+### 本地构建 APK
+
+```bash
+# 进入 Android 工程，Gradle 的 preBuild 会自动调用 scripts/build-rust.sh
+# 用 cargo-ndk 把 plane-core 交叉编译进 jniLibs，再打包进 APK。
+cd android-app
+
+# Debug APK
+./gradlew assembleDebug
+
+# Release APK（Rust 以 release profile 编译）
+./gradlew assembleRelease -PrustRelease
+```
+
+产物位置：
+
+- `android-app/app/build/outputs/apk/debug/app-debug.apk`
+- `android-app/app/build/outputs/apk/release/app-release-unsigned.apk`
+
+若已手动跑过 `scripts/build-rust.sh`，可加 `-PskipRustBuild=true` 跳过 Gradle 内的 Rust 构建步骤。也可单独交叉编译数据面：
+
+```bash
+scripts/build-rust.sh release   # 产出各 ABI 的 libplane_core.so 到 jniLibs
+```
+
+### 签名与 Release 打包
+
+默认 `assembleRelease` 在没有签名材料时产出 **unsigned** APK（无法直接安装）。配置签名后会自动产出已签名、可安装的 `app-release.apk`。
+
+**1. 生成 keystore（一次性）：**
+
+```bash
+keytool -genkeypair -v -keystore release.jks \
+  -alias simpleplane -keyalg RSA -keysize 2048 -validity 10000
+# 按提示设置 keystore 密码、key 密码与证书信息，妥善保管 release.jks（勿入库）
+```
+
+**2. 本地签名打包**：在仓库根目录创建 `keystore.properties`（已被 `.gitignore` 排除，不会入库）：
+
+```properties
+storeFile=release.jks
+storePassword=你的keystore密码
+keyAlias=simpleplane
+keyPassword=你的key密码
+```
+
+然后正常执行 `cd android-app && ./gradlew assembleRelease -PrustRelease`，产物为 `app-release.apk`。也可用环境变量 `ANDROID_KEYSTORE_PATH` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` 替代该文件（环境变量优先）。
+
+**3. CI 签名打包**：在 GitHub 仓库 Settings → Secrets and variables → Actions 配置以下 4 个 secrets，`android-build` job 会自动还原 keystore 并产出已签名的 release APK：
+
+| Secret | 说明 |
+|--------|------|
+| `ANDROID_KEYSTORE_BASE64` | `base64 -i release.jks`（macOS）或 `base64 -w0 release.jks`（Linux）的输出 |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 |
+| `ANDROID_KEY_ALIAS` | key 别名（如 `simpleplane`） |
+| `ANDROID_KEY_PASSWORD` | key 密码 |
+
+未配置这些 secrets 时（如 Fork 或未设置的分支），CI 仅产出 Debug APK，签名步骤自动跳过，不会失败。
+
+### CI 自动打包
+
+仓库已配置 `.github/workflows/android-core.yml`，当 `plane-core/**`、`android-app/**`、`scripts/build-rust.sh` 等路径变更并推送时自动触发：
+
+- `rust-test`：`cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`（强制门禁）；覆盖率为信息性输出。
+- `android-build`：cargo-ndk 交叉编译三 ABI 的 `.so` → `assembleDebug` → 把 Debug APK 上传为 artifact（`simpleplane-debug-apk`，保留 14 天）。若仓库配置了签名 secrets（见上节），还会额外 `assembleRelease` 并上传已签名的 release APK（`simpleplane-release-apk`）。
+
+推送后在 GitHub Actions 对应运行的 `android-build` job 的 Artifacts 中即可下载 APK。
+
 ## Web 管理面板（Dashboard）
 
 Dashboard 提供可视化界面来管理整个代理平台，包括一键启停服务、实时编辑配置、查看运行日志等。**零外部依赖，无需 npm install**。
@@ -600,6 +718,8 @@ cipherKey: your-secret-key
 
 支持的算法：`none`（无加密）、`aes-gcm`（推荐 x86，Intel AES-NI 硬件加速）、`chacha20`（推荐 ARM）、`aes-ctr-hmac`（经典组合）。
 
+> **传输层分帧说明**：加密数据在 HTTP/2 隧道中传输时，DATA 帧边界不保证与发送侧一一对应（受 maxFrameSize、流控、合帧影响），大流量下单个密文块可能被跨帧切分。为此收发两端统一在每个密文块前写入 4 字节大端长度前缀，接收侧据此做密文层字节级累积、集齐整块后再解密，避免 AEAD 认证标签校验失败导致的连接中断。Java（`CipherEncodeHandler`/`CipherDecodeHandler`）与 Rust（`plane-core`）两端实现完全对称，`chacha20` 算法的密文格式跨语言一致（由 `docs/design/crypto-vectors.json` 测试向量锁定）。
+
 ## 完整使用流程（从零开始）
 
 以下是一个完整的从零开始的部署示例：
@@ -667,7 +787,10 @@ curl --max-time 10 -I https://www.google.com
 |------|------|------|
 | Java | 1.8+ | 代理客户端/服务端 |
 | Netty | 4.1.108 | NIO 网络框架、HTTP/2 |
-| Rust | stable | TUN 适配器 |
+| Rust | stable | TUN 适配器 / Android 数据面（plane-core） |
+| Kotlin | 1.9 | Android 客户端 |
+| Android Gradle Plugin | 8.x (compileSdk 34, minSdk 24) | Android 工程构建 |
+| cargo-ndk | — | 把 plane-core 交叉编译为各 ABI 的 .so |
 | smoltcp | 0.11 | 用户态 TCP/IP 协议栈 |
 | tokio | 1.x | Rust 异步运行时 |
 | tun2 (crate) | 4.x | 跨平台 TUN 设备操作 (macOS/Windows/Linux) |
