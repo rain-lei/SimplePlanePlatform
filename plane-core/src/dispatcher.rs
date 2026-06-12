@@ -26,7 +26,7 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use tokio::net::TcpStream;
+use tokio::net::TcpSocket;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::crypto::Cipher;
@@ -160,25 +160,32 @@ where
 
     let addr = resolve_server_addr(&config.server_host, config.server_port)?;
 
-    // 先 connect 拿到 socket，再立刻 protect 其 fd（protect 铁律：protect 后流量才绕过 VPN）。
-    // 注：Android 上 connect 前无法拿到 tokio 的 fd；这里采用「connect 后立即 protect」，
-    // 与 VpnService.protect(socket) 语义一致（protect 对已建立 socket 生效，使其后续流量绕隧道）。
-    let tcp = TcpStream::connect(addr).await.map_err(|e| {
+    // protect 时机铁律（Android VpnService）：必须在 **connect 之前** protect 一个
+    // 尚未发起连接的 socket，否则 connect 发出的 SYN 会被 TUN（addRoute 0.0.0.0/0
+    // 全局接管）捕获形成回环，连接永远建不起来——表现为「能解析 DNS 但任何站点都打不开」。
+    //
+    // 实现：用 tokio 的 TcpSocket 建出**未连接**的 socket，立即取 fd 交 protect，
+    // protect 成功后再 connect。这样 SYN 直接走物理网卡绕过隧道。
+    // （不引入 socket2：tokio::net::TcpSocket 原生提供「先建后连」能力。）
+    use std::os::unix::io::AsRawFd;
+
+    let socket = TcpSocket::new_v4()
+        .map_err(|e| CoreError::Io(std::io::Error::other(format!("创建出站 socket 失败: {e}"))))?;
+
+    let fd = socket.as_raw_fd();
+    if !protector.protect(fd) {
+        return Err(CoreError::Internal(format!(
+            "protect socket fd={fd} 失败（流量会回环），放弃本连接"
+        )));
+    }
+    tracing::debug!("connect 前已 protect 出站 socket fd={}", fd);
+
+    // protect 之后再发起连接（SYN 已绕过 TUN）。
+    let tcp = socket.connect(addr).await.map_err(|e| {
         CoreError::Io(std::io::Error::other(format!(
             "连接 proxy-remote {addr} 失败: {e}"
         )))
     })?;
-
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = tcp.as_raw_fd();
-        if !protector.protect(fd) {
-            return Err(CoreError::Internal(format!(
-                "protect socket fd={fd} 失败（流量可能回环），放弃本连接"
-            )));
-        }
-        tracing::debug!("已 protect 到 proxy-remote 的 socket fd={}", fd);
-    }
 
     tcp.set_nodelay(true).ok();
 

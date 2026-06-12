@@ -102,8 +102,11 @@ class PlaneVpnService : VpnService() {
     /**
      * 配置并建立 TUN 接口。
      *
-     * - 地址：给 TUN 一个内网私有地址（10.0.0.2/32），作为应用流量的源。
-     * - 路由：`0.0.0.0/0` 全局接管（含 FakeIP 段 198.18.0.0/15）。
+     * - 地址：给 TUN 一个内网私有 IPv4（10.0.0.2/32）+ IPv6（[TUN_ADDRESS_V6]/128），作为应用流量源。
+     * - 路由：`0.0.0.0/0` 接管所有 IPv4（含 FakeIP 段 198.18.0.0/15）；同时 `::/0`
+     *   接管所有 IPv6。native 数据面 MVP 仅做 IPv4 出站，IPv6 包进栈后被丢弃，促使
+     *   应用 fallback 到 IPv4——若不接管 IPv6，手机走 IPv6 时流量会绕过隧道（泄漏），
+     *   或因 happy-eyeballs 优先 IPv6 而表现为「开 VPN 后什么都打不开」。
      * - DNS：指向 FakeDNS 服务器 198.18.0.1，使 DNS 查询进栈走 FakeDNS。
      * - MTU：1500（与 native 默认一致）。
      */
@@ -115,6 +118,10 @@ class PlaneVpnService : VpnService() {
                 .addAddress(TUN_ADDRESS, TUN_PREFIX)
                 // 全局接管所有 IPv4 流量（含 FakeIP 198.18.0.0/15）。
                 .addRoute("0.0.0.0", 0)
+                // 同时接管 IPv6：MVP 不做 IPv6 出站，进栈后丢弃，促使应用回退 IPv4，
+                // 避免 IPv6 流量绕过隧道造成泄漏 / happy-eyeballs 卡死。
+                .addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
+                .addRoute("::", 0)
                 // DNS 指向 FakeDNS 服务器地址，DNS 查询将被用户态栈用 FakeIP 应答。
                 .addDnsServer(FAKE_DNS_SERVER)
                 .establish()
@@ -243,6 +250,13 @@ class PlaneVpnService : VpnService() {
         /** TUN 接口内网地址与前缀（应用流量源地址）。 */
         private const val TUN_ADDRESS = "10.0.0.2"
         private const val TUN_PREFIX = 32
+
+        /**
+         * TUN 接口 IPv6 私有地址与前缀（ULA fd00::/8 段）。
+         * 仅用于接管 IPv6 流量使其进栈后丢弃、促使应用回退 IPv4，本身不做 IPv6 出站。
+         */
+        private const val TUN_ADDRESS_V6 = "fd00::2"
+        private const val TUN_PREFIX_V6 = 128
 
         /** FakeDNS 服务器地址（与 native FakeIP 池 198.18.0.1 一致）。 */
         private const val FAKE_DNS_SERVER = "198.18.0.1"
