@@ -74,6 +74,13 @@ if (-not $JavaHome) {
 }
 
 # 使用 jlink 生成精简 JRE
+# JDK 17 uses --compress=2 (ZIP), JDK 21+ uses --compress=zip-6
+if ([int]$javaVersion -ge 21) {
+    $compressArg = "--compress=zip-6"
+} else {
+    $compressArg = "--compress=2"
+}
+
 Write-Host "Running jlink..."
 & jlink `
     --module-path "$JavaHome\jmods" `
@@ -82,7 +89,7 @@ Write-Host "Running jlink..."
     --strip-debug `
     --no-man-pages `
     --no-header-files `
-    --compress=zip-6
+    $compressArg
 
 Write-Host ""
 Write-Host "=== JRE Build Complete ===" -ForegroundColor Green

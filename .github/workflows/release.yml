@@ -103,9 +103,11 @@ jobs:
             $modules = "java.base,java.logging,java.management,java.naming,java.net.http,java.security.jgss,java.sql,jdk.crypto.ec,jdk.unsupported"
           }
           
-          # Generate JRE
+          # Generate JRE (JDK 17 uses --compress=2, JDK 21+ uses --compress=zip-6)
           if (Test-Path $JRE_OUTPUT) { Remove-Item $JRE_OUTPUT -Recurse -Force }
-          & jlink --module-path "$JAVA_HOME_PATH/jmods" --add-modules $modules --output $JRE_OUTPUT --strip-debug --no-man-pages --no-header-files --compress=zip-6
+          $javaVer = & java -version 2>&1 | Select-String -Pattern '"(\d+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $compressFlag = if ([int]$javaVer -ge 21) { "--compress=zip-6" } else { "--compress=2" }
+          & jlink --module-path "$JAVA_HOME_PATH/jmods" --add-modules $modules --output $JRE_OUTPUT --strip-debug --no-man-pages --no-header-files $compressFlag
           
           Write-Host "JRE generated at $JRE_OUTPUT"
           & "$JRE_OUTPUT/bin/java" -version

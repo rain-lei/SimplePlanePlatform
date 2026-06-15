@@ -68,6 +68,13 @@ rm -rf "$JRE_OUTPUT"
 echo "Running jlink..."
 JAVA_HOME_DIR=$(dirname $(dirname $(readlink -f $(which java) 2>/dev/null || echo $(which java))))
 
+# JDK 17 uses --compress=2 (ZIP), JDK 21+ uses --compress=zip-6
+if [ "$JAVA_VERSION" -ge 21 ]; then
+    COMPRESS_ARG="--compress=zip-6"
+else
+    COMPRESS_ARG="--compress=2"
+fi
+
 jlink \
     --module-path "$JAVA_HOME_DIR/jmods" \
     --add-modules "$MODULES" \
@@ -75,7 +82,7 @@ jlink \
     --strip-debug \
     --no-man-pages \
     --no-header-files \
-    --compress=zip-6
+    $COMPRESS_ARG
 
 echo ""
 echo "=== JRE Build Complete ==="
