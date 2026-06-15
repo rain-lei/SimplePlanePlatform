@@ -54,7 +54,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@latest
+        run: cargo install tauri-cli --locked
 
       - name: Cache Maven
         uses: actions/cache@v4
@@ -66,6 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
             target
@@ -152,7 +153,7 @@ jobs:
         if: "!startsWith(github.ref, 'refs/tags/')"
         run: |
           cd desktop
-          npx tauri build --target ${{ matrix.target }}
+          cargo tauri build --target ${{ matrix.target }}
 
       # Step 5b: Build + Release (tag push only)
       - name: Build & Release Tauri Desktop App
