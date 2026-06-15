@@ -178,22 +178,41 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Press Ctrl+C to stop");
 
     // 12. 等待退出信号或任一核心任务异常
-    // 同时监听 SIGTERM（来自 cleanup 中的 sudo kill）
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register SIGTERM handler");
+    #[cfg(unix)]
+    {
+        // Unix: 同时监听 SIGTERM（来自 cleanup 中的 sudo kill）
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Received Ctrl+C, shutting down...");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Received Ctrl+C, shutting down...");
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM, shutting down...");
+            }
+            res = stack_handle => {
+                tracing::error!("Stack loop exited unexpectedly: {:?}", res);
+            }
+            res = conn_handle => {
+                tracing::error!("Connection dispatcher exited unexpectedly: {:?}", res);
+            }
         }
-        _ = sigterm.recv() => {
-            tracing::info!("Received SIGTERM, shutting down...");
-        }
-        res = stack_handle => {
-            tracing::error!("Stack loop exited unexpectedly: {:?}", res);
-        }
-        res = conn_handle => {
-            tracing::error!("Connection dispatcher exited unexpectedly: {:?}", res);
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows: 只监听 Ctrl+C（无 SIGTERM 概念）
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Received Ctrl+C, shutting down...");
+            }
+            res = stack_handle => {
+                tracing::error!("Stack loop exited unexpectedly: {:?}", res);
+            }
+            res = conn_handle => {
+                tracing::error!("Connection dispatcher exited unexpectedly: {:?}", res);
+            }
         }
     }
 
