@@ -50,19 +50,7 @@
   },
   "plugins": {
     "shell": {
-      "open": true,
-      "scope": [
-        {
-          "name": "java-proxy",
-          "cmd": "resources/jre/bin/java",
-          "args": ["-jar", "resources/proxy-local.jar"]
-        },
-        {
-          "name": "tun-adapter",
-          "cmd": "resources/tun-adapter",
-          "args": true
-        }
-      ]
+      "open": true
     }
   }
 }
