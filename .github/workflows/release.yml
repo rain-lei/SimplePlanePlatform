@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+    branches:
+      - main
+      - feat/desktop-client
+  pull_request:
+    branches:
+      - main
 
 env:
   JAVA_VERSION: '17'
@@ -139,12 +145,19 @@ jobs:
           Write-Host "Resources collected!"
           Get-ChildItem $RESOURCES
 
-      # Step 5: Build Tauri app
+      # Step 5: Build Tauri app (branch push / PR — build only, no release)
       - name: Build Tauri Desktop App
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: |
+          cd desktop
+          cargo tauri build --target ${{ matrix.target }}
+
+      # Step 5b: Build + Release (tag push only)
+      - name: Build & Release Tauri Desktop App
+        if: startsWith(github.ref, 'refs/tags/')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing (optional)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
