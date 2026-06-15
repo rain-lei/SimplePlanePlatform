@@ -1,0 +1,160 @@
+name: Release Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  JAVA_VERSION: '17'
+  RUST_VERSION: 'stable'
+  NODE_VERSION: '20'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: SimplePlane_macos_arm64
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: SimplePlane_macos_x64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: SimplePlane_windows_x64
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js (for Tauri CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@latest
+
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Step 1: Build fat-jar
+      - name: Build proxy-local fat-jar
+        run: mvn package -pl proxy-local -am -DskipTests -q
+
+      # Step 2: Build tun-adapter
+      - name: Build tun-adapter
+        run: |
+          cd tun-adapter
+          cargo build --release --target ${{ matrix.target }}
+          cd ..
+
+      # Step 3: Generate minimal JRE
+      - name: Generate minimal JRE (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x desktop/scripts/build-jre.sh
+          desktop/scripts/build-jre.sh
+
+      - name: Generate minimal JRE (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $FAT_JAR = "proxy-local/target/proxy-local-1.0.0-SNAPSHOT.jar"
+          $JRE_OUTPUT = "desktop/src-tauri/resources/jre"
+          $JAVA_HOME_PATH = $env:JAVA_HOME
+          
+          # Analyze dependencies
+          $modules = & jdeps --ignore-missing-deps --print-module-deps $FAT_JAR 2>$null
+          if (-not $modules) {
+            $modules = "java.base,java.logging,java.management,java.naming,java.net.http,java.security.jgss,java.sql,jdk.crypto.ec,jdk.unsupported"
+          }
+          
+          # Generate JRE
+          if (Test-Path $JRE_OUTPUT) { Remove-Item $JRE_OUTPUT -Recurse -Force }
+          & jlink --module-path "$JAVA_HOME_PATH/jmods" --add-modules $modules --output $JRE_OUTPUT --strip-debug --no-man-pages --no-header-files --compress=zip-6
+          
+          Write-Host "JRE generated at $JRE_OUTPUT"
+          & "$JRE_OUTPUT/bin/java" -version
+
+      # Step 4: Collect resources
+      - name: Collect resources (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x desktop/scripts/collect-resources.sh
+          desktop/scripts/collect-resources.sh
+
+      - name: Collect resources (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $RESOURCES = "desktop/src-tauri/resources"
+          New-Item -ItemType Directory -Force -Path $RESOURCES | Out-Null
+          
+          # Copy fat-jar
+          Copy-Item "proxy-local/target/proxy-local-1.0.0-SNAPSHOT.jar" "$RESOURCES/proxy-local.jar"
+          
+          # Copy tun-adapter
+          Copy-Item "tun-adapter/target/${{ matrix.target }}/release/tun-adapter.exe" "$RESOURCES/tun-adapter.exe"
+          
+          # Copy web UI
+          if (Test-Path "desktop/web") {
+            Copy-Item -Recurse "desktop/web" "$RESOURCES/web"
+          }
+          
+          # Copy config templates
+          New-Item -ItemType Directory -Force -Path "$RESOURCES/config-templates" | Out-Null
+          Copy-Item "proxy-local/src/main/resources/proxy.yml" "$RESOURCES/config-templates/proxy.yml"
+          if (Test-Path "tun-adapter/config/tun.toml") {
+            Copy-Item "tun-adapter/config/tun.toml" "$RESOURCES/config-templates/tun.toml"
+          }
+          
+          Write-Host "Resources collected!"
+          Get-ChildItem $RESOURCES
+
+      # Step 5: Build Tauri app
+      - name: Build Tauri Desktop App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing (optional)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'SimplePlane ${{ github.ref_name }}'
+          releaseBody: 'See the assets to download and install this version.'
+          releaseDraft: true
+          prerelease: false
