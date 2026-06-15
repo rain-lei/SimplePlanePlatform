@@ -1206,11 +1206,16 @@ try { localConfigMtime = fs.statSync(LOCAL_CONFIG).mtimeMs; } catch {}
 try { remoteConfigMtime = fs.statSync(REMOTE_CONFIG).mtimeMs; } catch {}
 try { tunConfigMtime = fs.statSync(TUN_CONFIG).mtimeMs; } catch {}
 
-server.listen(PORT, () => {
-  const platformLabel = IS_WIN ? 'Windows' : IS_MAC ? 'macOS' : 'Linux';
-  console.log(`\x1b[32m✓\x1b[0m SimplePlane Dashboard running at \x1b[36mhttp://localhost:${PORT}\x1b[0m (${platformLabel})`);
-  console.log(`  Configs: proxy.yml | remote.yml | tun.toml`);
-});
+// Only start the HTTP server when this file is run directly (`node server.js`).
+// When `require`d by unit tests we skip listening so the test process does not
+// bind a port or hold the event loop open.
+if (require.main === module) {
+  server.listen(PORT, () => {
+    const platformLabel = IS_WIN ? 'Windows' : IS_MAC ? 'macOS' : 'Linux';
+    console.log(`\x1b[32m✓\x1b[0m SimplePlane Dashboard running at \x1b[36mhttp://localhost:${PORT}\x1b[0m (${platformLabel})`);
+    console.log(`  Configs: proxy.yml | remote.yml | tun.toml`);
+  });
+}
 
 // Graceful shutdown
 let shuttingDown = false;
@@ -1242,5 +1247,19 @@ function gracefulShutdown(signal) {
   }, 2000);
 }
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+if (require.main === module) {
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+}
+
+// Export pure / side-effect-free helpers for unit testing. Requiring this file
+// from a test does NOT start the server (see the `require.main === module`
+// guard above), so these can be exercised in isolation.
+module.exports = {
+  classifySudoFailure,
+  isPortListening,
+  getSetupStatus,
+  getJarPath,
+  getTunBinaryPath,
+  getStatusAll,
+};

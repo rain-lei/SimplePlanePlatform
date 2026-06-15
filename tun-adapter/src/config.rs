@@ -473,4 +473,77 @@ range = "198.18.0.0/15"
         let result = Config::load(tmp.path());
         assert!(result.is_err());
     }
+
+    /// TC-TUN-007 [P1]：配置缺失字段时应走 serde default，而非报错。
+    /// 这里给一份几乎全空的 TOML，断言关键字段都回落到内置默认值。
+    #[test]
+    fn test_tun007_missing_fields_fallback_to_defaults() {
+        // 仅提供能通过 validate 的最小必需项之外，其余全部缺省。
+        let toml_content = "";
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+
+        // tun 默认值
+        assert_eq!(config.tun.mtu, 1500, "MTU 应回落默认 1500");
+        assert_eq!(config.tun.address, Ipv4Addr::new(198, 18, 0, 1));
+        assert!(config.tun.enabled, "enabled 应默认 true");
+        // proxy 默认值
+        assert_eq!(config.proxy.socks5_addr, "127.0.0.1:1080");
+        assert_eq!(config.proxy.health_failure_threshold, 3);
+        // routing 默认值
+        assert_eq!(config.routing.default_action, "proxy");
+        assert!(config.routing.rules.is_empty());
+        // fakeip 默认值
+        assert_eq!(config.fakeip.range, "198.18.0.0/15");
+        // bypass 默认值：内网三段 + 公共 DNS
+        assert_eq!(config.bypass.extra_cidrs.len(), 3);
+        assert!(config.bypass.extra_cidrs.contains(&"10.0.0.0/8".to_string()));
+        assert!(config.bypass.dns_bypass_ips.contains(&"223.5.5.5".to_string()));
+    }
+
+    /// 补充：非法路由规则类型必须被 validate 拒绝（健壮性，对应 §5.2 TC-ROB-001）。
+    #[test]
+    fn test_rob001_invalid_rule_type_rejected() {
+        let toml_content = r#"
+[proxy]
+socks5_addr = "127.0.0.1:1080"
+
+[fakeip]
+range = "198.18.0.0/15"
+
+[[routing.rules]]
+type = "not_a_real_type"
+value = "x"
+action = "proxy"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml_content.as_bytes()).unwrap();
+
+        let result = Config::load(tmp.path());
+        assert!(result.is_err(), "非法 rule type 必须被拒绝");
+    }
+
+    /// 补充：非法路由动作必须被 validate 拒绝。
+    #[test]
+    fn test_rob001_invalid_action_rejected() {
+        let toml_content = r#"
+[proxy]
+socks5_addr = "127.0.0.1:1080"
+
+[fakeip]
+range = "198.18.0.0/15"
+
+[[routing.rules]]
+type = "domain_suffix"
+value = "cn"
+action = "teleport"
+"#;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(toml_content.as_bytes()).unwrap();
+
+        let result = Config::load(tmp.path());
+        assert!(result.is_err(), "非法 action 必须被拒绝");
+    }
 }

@@ -35,6 +35,8 @@
         <snakeyaml.version>2.2</snakeyaml.version>
         <junit.version>5.10.2</junit.version>
         <bouncycastle.version>1.70</bouncycastle.version>
+        <!-- 覆盖率插件：0.8.11 兼容 Java 8 字节码 -->
+        <jacoco.version>0.8.11</jacoco.version>
     </properties>
 
     <dependencyManagement>
@@ -156,7 +158,43 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.2.5</version>
                 </plugin>
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>${jacoco.version}</version>
+                </plugin>
             </plugins>
         </pluginManagement>
+
+        <!--
+          实际生效的插件（被各子模块继承）。
+          JaCoCo 覆盖率：
+            - prepare-agent  在 test 阶段前挂载 JaCoCo agent，记录被执行的代码
+            - report         在 test 阶段后生成 HTML/XML/CSV 报告
+                             （各模块 target/site/jacoco/index.html）
+          当前仅生成报告、不设阈值门禁；待整体代码量稳定后，可在此追加
+          check execution（rule + limit）把覆盖率不达标变为构建失败。
+        -->
+        <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>jacoco-prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>jacoco-report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 </project>

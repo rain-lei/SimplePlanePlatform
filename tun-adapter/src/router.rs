@@ -427,4 +427,91 @@ mod tests {
         );
         assert_eq!(router.route(&info), RouteAction::Reject);
     }
+
+    // =====================================================================
+    // 《项目测试计划与清单》§4.2 + §6 回归用例
+    //
+    // 系统在 TUN 模式下的 bypass 规则（见 route_guard.rs::setup）会把
+    // proxy-remote 出口 IP 与内网 extra_cidrs 以 `ip_cidr -> direct` 注入路由表，
+    // 普通公网走默认 `proxy`。下面用与生产一致的规则组合来锁定这三类决策，
+    // 尤其是 TC-REG-001：proxy-remote IP 若未被判为 direct 会导致“路由环路 / 全网不通”。
+    // =====================================================================
+
+    /// 构造一份与 TUN 模式 bypass 等价的路由配置：
+    /// proxy-remote IP 与内网网段走 direct，默认走 proxy。
+    fn bypass_like_router(proxy_remote_ip: &str, extra_cidr: &str) -> Router {
+        let config = RoutingConfig {
+            default_action: "proxy".to_string(),
+            rules: vec![
+                RuleConfig {
+                    rule_type: "ip_cidr".to_string(),
+                    value: format!("{}/32", proxy_remote_ip),
+                    action: "direct".to_string(),
+                },
+                RuleConfig {
+                    rule_type: "ip_cidr".to_string(),
+                    value: extra_cidr.to_string(),
+                    action: "direct".to_string(),
+                },
+            ],
+        };
+        Router::from_config(&config).unwrap()
+    }
+
+    /// TC-REG-001 / TC-TUN-001 [P0]：proxy-remote 出口 IP 必须判为 direct（bypass），
+    /// 绝不能再进 TUN 走 proxy，否则会形成“代理流量再次被劫持”的路由环路。
+    #[test]
+    fn test_reg001_proxy_remote_ip_must_be_direct() {
+        let router = bypass_like_router("203.0.113.10", "10.0.0.0/8");
+
+        let info = make_info(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            9090, // proxy-remote 监听端口
+            None, // 出站到 remote 时按 IP 决策，无域名
+        );
+        assert_eq!(
+            router.route(&info),
+            RouteAction::Direct,
+            "proxy-remote IP 必须 bypass（direct），否则触发路由环路全网不通"
+        );
+    }
+
+    /// TC-TUN-002 [P0]：内网网段（extra_cidrs）走 direct，保证开启 TUN 后内网仍可达。
+    #[test]
+    fn test_tun002_intranet_cidr_is_direct() {
+        let router = bypass_like_router("203.0.113.10", "10.0.0.0/8");
+
+        let info = make_info(IpAddr::V4(Ipv4Addr::new(10, 12, 34, 56)), 22, None);
+        assert_eq!(
+            router.route(&info),
+            RouteAction::Direct,
+            "内网网段必须走 direct，否则内网资源不可达"
+        );
+    }
+
+    /// TC-TUN-003 [P0]：普通公网 IP（既非 remote 也非内网）走 proxy（默认动作）。
+    #[test]
+    fn test_tun003_public_ip_is_proxy() {
+        let router = bypass_like_router("203.0.113.10", "10.0.0.0/8");
+
+        let info = make_info(IpAddr::V4(Ipv4Addr::new(142, 250, 72, 14)), 443, None);
+        assert_eq!(
+            router.route(&info),
+            RouteAction::Proxy,
+            "普通公网 IP 应走 proxy（默认动作）"
+        );
+    }
+
+    /// 补充：proxy-remote IP 即使带任意域名/端口也应稳定 direct（first-match-wins 不被域名误导）。
+    #[test]
+    fn test_reg001_proxy_remote_ip_direct_regardless_of_domain() {
+        let router = bypass_like_router("198.51.100.7", "192.168.0.0/16");
+
+        let info = make_info(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+            9090,
+            Some("my-remote.example.com"),
+        );
+        assert_eq!(router.route(&info), RouteAction::Direct);
+    }
 }

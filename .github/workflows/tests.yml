@@ -1,0 +1,128 @@
+# 单元/集成测试 CI（对应《项目测试计划与清单》§8.2 流水线）
+#
+# 把三种技术栈的测试跑成 push/PR 的自动护栏：
+#
+#   - job: java-unit  —— mvn test（确定性单元/集成模块）+ JaCoCo 覆盖率（信息性）
+#                        覆盖：proxy-crypto / proxy-common / proxy-transport-netty / proxy-local
+#                        门禁：测试全过。JaCoCo 报告（target/site/jacoco）作为 artifact 上传，
+#                        当前不设阈值门禁；待代码量稳定后可在 pom 补 check execution 收紧（§8.1）。
+#   - job: rust-tun   —— tun-adapter 的 cargo test + clippy（clippy 信息性，不阻断）
+#                        门禁：cargo test 全过。
+#   - job: node-dash  —— dashboard 的 node --test（零依赖）
+#                        门禁：测试全过。
+#
+# 关于 proxy-remote 集成测试（ClientServerIntegrationTest / OutboundIntegrationTest /
+# BaiduProxyTest）：它们会启动真实 Netty 服务并依赖真实网络（如访问外网），属于
+# 《测试计划》§7 中“需真实终端 + 真实 proxy-remote 服务器”的 E2E 范畴，不适合在无网络的
+# CI runner 上作为门禁。这里 java-unit 仅跑确定性模块；待 §9.7 E2E 脚本化后再单独接入。
+#
+# 触发：push 到任意分支 + 针对 main/master 的 PR；仅相关路径变更时触发。
+
+name: tests
+
+on:
+  push:
+    paths:
+      - "proxy-*/**"
+      - "tun-adapter/**"
+      - "dashboard/**"
+      - "pom.xml"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "proxy-*/**"
+      - "tun-adapter/**"
+      - "dashboard/**"
+      - "pom.xml"
+      - ".github/workflows/tests.yml"
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Java 后端：确定性单元/集成模块的 mvn test + JaCoCo 覆盖率（信息性）
+  # ---------------------------------------------------------------------------
+  java-unit:
+    name: Java 单测（crypto / common / transport / local）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 8（项目编译目标）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+
+      # -pl 指定确定性模块，-am 连带构建其依赖；跳过会依赖真实网络的 proxy-remote 集成测试。
+      # 根 pom 的 jacoco-maven-plugin 会在 test 阶段自动生成各模块覆盖率报告。
+      - name: mvn test（确定性模块 + JaCoCo 报告）
+        run: >-
+          mvn -B test
+          -pl proxy-crypto,proxy-common,proxy-transport-netty,proxy-local
+          -am
+
+      # 覆盖率报告作为 artifact 上传，便于在 PR 中查看；不作为门禁。
+      - name: 上传 JaCoCo 覆盖率报告（信息性）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports
+          path: "**/target/site/jacoco/"
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Rust：tun-adapter 的 cargo test（门禁）+ clippy（信息性）
+  # ---------------------------------------------------------------------------
+  rust-tun:
+    name: Rust tun-adapter（test / clippy）
+    runs-on: ubuntu-latest
+    env:
+      CRATE_DIR: tun-adapter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链（含 clippy）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: 缓存 cargo registry 与 target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.CRATE_DIR }}
+
+      - name: cargo test
+        working-directory: ${{ env.CRATE_DIR }}
+        run: cargo test
+
+      # clippy 当前为信息性输出：tun-adapter 仍有历史告警，待清理后再改为 -D warnings 门禁。
+      - name: cargo clippy（信息性，不阻断）
+        working-directory: ${{ env.CRATE_DIR }}
+        run: cargo clippy --all-targets || true
+
+  # ---------------------------------------------------------------------------
+  # Node：dashboard 的 node:test（零依赖）
+  # ---------------------------------------------------------------------------
+  node-dash:
+    name: Node dashboard（node --test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: npm test（node:test）
+        working-directory: dashboard
+        run: npm test
