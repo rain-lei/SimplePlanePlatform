@@ -102,4 +102,16 @@ public class StreamChannelRegistry {
     public int size() {
         return registry.size();
     }
+
+    /**
+     * 获取内部 ConcurrentHashMap 引用（供 ExchangeHandler 直接共享）
+     * <p>
+     * 注意：返回的是同一个 map 实例的引用，ExchangeHandler 和 StreamChannelRegistry
+     * 共享同一份数据，对 map 的增删会互相可见。这正是设计意图——
+     * registry 负责 register/unregister 生命周期，ExchangeHandler 负责查表写回。
+     * </p>
+     */
+    public ConcurrentHashMap<Long, ChannelHandlerContext> getInternalMap() {
+        return registry;
+    }
 }

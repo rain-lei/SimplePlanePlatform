@@ -1,0 +1,57 @@
+[package]
+name = "plane-core"
+version = "0.1.0"
+edition = "2021"
+description = "Android data-plane core for SimplePlanePlatform (compiled as JNI cdylib)"
+authors = ["zhanghonghao"]
+
+# Android 通过 JNI 加载本 crate，必须产出动态库（libplane_core.so）。
+[lib]
+name = "plane_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# JNI 桥接（A2 起使用，A1 仅用于 nativeVersion 占位导出）
+jni = "0.21"
+# 异步运行时（Android 上 worker_threads = 2，见任务文档 0.2）
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+# 日志：tracing + logcat 输出，禁止 println!（见任务文档 0.2）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# 错误处理
+thiserror = "2"
+# 系统调用（fd 读写、socket protect 等，A3 起使用）
+libc = "0.2"
+# 配置解析（configJson 入参）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# A4 数据面：FakeDNS + IP 包识别。
+# 以下三者与桌面 tun-adapter 的 fake_dns.rs 使用**完全相同**的 crate 与版本，
+# 确保 FakeDNS 逻辑两端一致（plane-net 共享 crate 抽取前的过渡手段，见 net_probe.rs 技术债说明）。
+lru = "0.12"      # FakeIP 双向 LRU 映射
+ipnet = "2"       # FakeIP CIDR 池解析
+hickory-proto = "0.24" # DNS 报文解析/编码
+
+# A6 用户态 TCP 栈：与桌面 tun-adapter 使用**完全相同**的 smoltcp 版本与 features，
+# 确保 TCP 握手/字节流提取逻辑两端一致（见 tcp_stack.rs，移植自桌面 stack.rs）。
+smoltcp = { version = "0.11", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-dns"] }
+
+# A5 出站层：与 Java proxy-remote 二进制兼容的加密 HTTP/2 客户端。
+# ⚠️ 必须用 chacha20（流密码引擎）+ poly1305（裸 MAC），严禁用聚合的 chacha20poly1305 crate，
+# 后者按 RFC 8439 做 padding/长度尾块，与 Java 的非标准实现（见 ChaCha20Cipher.java）不兼容。
+chacha20 = "0.9"  # ChaCha20 流密码（IETF/RFC7539 变体，对齐 BouncyCastle ChaCha7539Engine）
+poly1305 = "0.8"  # 裸 Poly1305 MAC（仅对密文计算，无 AAD/无 padding/无长度尾块）
+sha2 = "0.10"     # key.len()!=32 时 SHA-256 派生 32 字节密钥（对齐 Java）
+rand = "0.8"      # 随机 nonce 生成
+# HTTP/2 出站（h2 客户端）+ 字节缓冲 + 头部类型
+h2 = "0.4"
+bytes = "1"
+http = "1"
+
+# tracing-android 仅在 Android 目标上启用，桌面（如 macOS 本机 cargo check）跳过，
+# 避免在非 Android 平台拉入 android 专用依赖导致编译失败。
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-android = "0.2"
+
+[dev-dependencies]
+tokio-test = "0.4"

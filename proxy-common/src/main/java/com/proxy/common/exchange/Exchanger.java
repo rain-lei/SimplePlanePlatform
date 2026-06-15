@@ -18,7 +18,7 @@ import com.proxy.common.spi.SPI;
  * <p>
  * bind() 内部：
  * <pre>
- * 1. 创建 ServerExchangeHandler（将 Invoker 注入）
+ * 1. 创建 ExchangeHandler(invoker)（服务端角色，Invoker 注入）
  * 2. 调用 transporter.bind(url, handler) → 拿到底层 Server
  * 3. 包装成 ExchangeServer 返回给上层
  * </pre>
@@ -53,7 +53,7 @@ public interface Exchanger {
      * 绑定本地端口，创建并启动 ExchangeServer
      * <p>
      * 与 {@link #connect(URL)} 对称：connect 创建客户端，bind 创建服务端。
-     * 内部组装 ServerExchangeHandler + 调用 Transporter.bind() + 包装成 ExchangeServer。
+     * 内部组装 ExchangeHandler(invoker) + 调用 Transporter.bind() + 包装成 ExchangeServer。
      * </p>
      * <p>
      * invoker 是已封装 Filter 链的最终调用器，Exchanger 不关心 Filter 编排细节，

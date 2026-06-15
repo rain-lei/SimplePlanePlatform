@@ -112,6 +112,10 @@ public class ProxyLocalServer {
                 // Exchanger.connect() → 内部创建 Transporter 连接 → 包装为 ExchangeClient
                 ExchangeClient exchangeClient = exchanger.connect(url);
 
+                // 注入 StreamChannelRegistry 的路由表，使 ExchangeHandler 能按 streamId 写回浏览器
+                exchangeClient.setStreamRegistry(
+                        com.proxy.local.handler.StreamChannelRegistry.getInstance().getInternalMap());
+
                 // ClientInvoker 适配 ExchangeClient → Invoker 接口
                 ClientInvoker clientInvoker = new ClientInvoker(exchangeClient, config.getTimeoutMs());
 

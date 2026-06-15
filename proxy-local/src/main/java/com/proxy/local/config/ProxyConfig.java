@@ -38,7 +38,7 @@ public class ProxyConfig {
     /**
      * 请求超时时间（毫秒）
      */
-    private long timeoutMs = 30000;
+    private long timeoutMs = 8000;
 
     /**
      * 每个远程节点的连接数

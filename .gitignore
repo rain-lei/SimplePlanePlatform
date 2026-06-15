@@ -29,6 +29,8 @@ logs/
 *.p12
 *.jks
 *.keystore
+# Android 签名密码配置（含明文密码，绝不入库）
+keystore.properties
 
 # === JVM ===
 hs_err_pid*.log
@@ -36,3 +38,26 @@ replay_pid*.log
 
 # === Misc ===
 /tmp/
+
+# === 本地运行临时文件 ===
+proxy-local-console.out
+.claude/
+# AI 编码插件（superpowers）自动生成的计划目录，非本仓库源码，不入库。
+docs/superpowers/
+
+# === Android 客户端（android-app）构建产物 ===
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/captures/
+android-app/.cxx/
+# cargo-ndk 编译出的 .so 为构建产物，不入库（由 scripts/build-rust.sh 生成）
+android-app/app/src/main/jniLibs/
+
+# Gradle wrapper 的 jar 是必需文件，必须入库；
+# 上面全局 *.jar 会忽略它，这里显式取消忽略。
+!android-app/gradle/wrapper/gradle-wrapper.jar
+
+# === Rust 数据面 crate（plane-core）构建产物 ===
+plane-core/target/

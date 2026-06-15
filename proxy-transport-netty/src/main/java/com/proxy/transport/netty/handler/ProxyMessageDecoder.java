@@ -3,45 +3,59 @@ package com.proxy.transport.netty.handler;
 import com.proxy.common.codec.Codec;
 import com.proxy.common.model.ProxyMessage;
 import com.proxy.common.spi.ExtensionLoader;
+import com.proxy.common.transport.FlowPermit;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.MessageToMessageDecoder;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.http2.Http2DataFrame;
+import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 /**
  * HTTP/2 DATA 帧 → ProxyMessage 解码器（支持跨帧累积）
  * <p>
- * HTTP/2 DATA 帧有最大帧大小限制（默认 SETTINGS_MAX_FRAME_SIZE = 16384 字节），
- * 当一个 ProxyMessage 编码后超过该限制时，会被拆分成多个 DATA 帧。
- * 本解码器维护一个累积缓冲区，正确处理跨帧的消息重组。
+ * 接受两种上游消息类型：
+ * <ul>
+ *   <li>{@link PermittedDataFrame} —— 背压开启时由 BackpressureHandler 下发，携带 FlowPermit</li>
+ *   <li>{@link Http2DataFrame} —— 背压关闭时由 CipherDecodeHandler 直接下发</li>
+ * </ul>
  * </p>
  * <p>
- * 协议格式（来自 ProxyCodec）：
- * <pre>
- * 固定头部 28 字节：Type(1) + Status(1) + RequestId(8) + StreamId(8) + HostLen(2) + Port(4) + DataLen(4)
- * 变长部分：Host(hostLen) + Data(dataLen)
- * </pre>
+ * 每次解码出完整 {@link ProxyMessage} 时，将当前所有 pending permit 合并后存入
+ * Channel Attribute（key = {@code "proxy.flow.permit"}），再通过 fireChannelRead
+ * 触发下游 ExchangeHandler。ExchangeHandler 在 channelRead0 中读取并清除该 attr。
  * </p>
  */
-public class ProxyMessageDecoder extends MessageToMessageDecoder<Http2DataFrame> {
+public class ProxyMessageDecoder extends ChannelInboundHandlerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(ProxyMessageDecoder.class);
 
     private static final int FIXED_HEADER_SIZE = 28;
 
+    /**
+     * Channel Attribute Key —— 与 ExchangeHandler 中的字符串必须完全相同。
+     * Netty 的 AttributeKey.valueOf() 按名称复用实例，两处无需共享常量。
+     */
+    static final AttributeKey<FlowPermit> PERMIT_KEY =
+            AttributeKey.valueOf("proxy.flow.permit");
+
     private final Codec codec;
 
-    /**
-     * 累积缓冲区：用于跨 DATA 帧的消息重组
-     */
+    /** 累积缓冲区：跨 DATA 帧的消息重组 */
     private CompositeByteBuf cumulation;
+
+    /**
+     * 当前帧流中尚未分配给任何 ProxyMessage 的 permit 列表。
+     * 每帧入队 1 个，解码出完整消息时全部合并并清空。
+     */
+    private final Deque<FlowPermit> pendingPermits = new ArrayDeque<>();
 
     public ProxyMessageDecoder() {
         this.codec = ExtensionLoader.getLoader(Codec.class).getDefaultExtension();
@@ -52,64 +66,92 @@ public class ProxyMessageDecoder extends MessageToMessageDecoder<Http2DataFrame>
     }
 
     @Override
-    protected void decode(ChannelHandlerContext ctx, Http2DataFrame frame, List<Object> out) throws Exception {
-        ByteBuf content = frame.content();
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        // 提取帧内容和对应的 permit
+        final Http2DataFrame frame;
+        final FlowPermit permit;
 
+        if (msg instanceof PermittedDataFrame) {
+            PermittedDataFrame pdf = (PermittedDataFrame) msg;
+            frame = pdf.frame();
+            permit = pdf.permit();
+        } else if (msg instanceof Http2DataFrame) {
+            frame = (Http2DataFrame) msg;
+            permit = FlowPermit.NOOP;
+        } else {
+            // 非 DATA 帧（HEADERS、RST_STREAM 等）直接透传
+            ctx.fireChannelRead(msg);
+            return;
+        }
+
+        ByteBuf content = frame.content();
         if (content.readableBytes() == 0) {
+            // 空帧：permit 不需要排进队列，直接释放
+            permit.release();
+            frame.release();
             log.debug("Received empty HTTP/2 DATA frame, skipping");
             return;
         }
 
-        // 将 DATA 帧内容追加到累积缓冲区
+        // 将此帧的 permit 加入待归并列表
+        pendingPermits.addLast(permit);
+
+        // 将 DATA 帧内容追加到累积缓冲区（retain 后 frame 可安全释放）
         if (cumulation == null) {
             cumulation = ctx.alloc().compositeBuffer(256);
         }
         cumulation.addComponent(true, content.retain());
+        // 释放 frame wrapper：content 已被 cumulation 持有，frame 本身不再需要
+        frame.release();
 
-        // 尝试从累积缓冲区中解码尽可能多的完整消息
+        // 尝试解码所有完整消息
         while (cumulation.readableBytes() > 0) {
             int readerIndex = cumulation.readerIndex();
 
-            // 检查是否有足够的字节读取固定头部
             if (cumulation.readableBytes() < FIXED_HEADER_SIZE) {
-                break; // 等待更多数据
+                break;
             }
 
-            // 解析 hostLen（位于偏移 18-19，即 Type(1)+Status(1)+RequestId(8)+StreamId(8) 之后）
             int hostLen = cumulation.getUnsignedShort(readerIndex + 18);
-
-            // 检查是否有足够的字节读取完头部（包含 host）
-            // 头部总长 = 28 + hostLen
             int headerTotalLen = FIXED_HEADER_SIZE + hostLen;
             if (cumulation.readableBytes() < headerTotalLen) {
-                break; // 等待更多数据
+                break;
             }
 
-            // 解析 dataLen（位于偏移 28 + hostLen - 4，即 Port(4) + DataLen(4) 中的 DataLen）
-            // 准确位置：Type(1)+Status(1)+RequestId(8)+StreamId(8)+HostLen(2)+Host(hostLen)+Port(4) 之后
-            // = 20 + hostLen + 4 = 24 + hostLen
             int dataLen = cumulation.getInt(readerIndex + 24 + hostLen);
-
-            // 完整消息长度
             int totalMessageLen = headerTotalLen + dataLen;
             if (cumulation.readableBytes() < totalMessageLen) {
-                break; // 等待更多数据
+                break;
             }
 
-            // 有一个完整的消息，读取并解码
             byte[] messageBytes = new byte[totalMessageLen];
             cumulation.readBytes(messageBytes);
 
-            ProxyMessage msg = codec.decode(messageBytes);
-            if (msg != null) {
-                out.add(msg);
-                log.trace("Decoded ProxyMessage: type={}, requestId={}, dataLen={}",
-                        msg.getType(), msg.getRequestId(),
-                        msg.getData() != null ? msg.getData().length : 0);
+            ProxyMessage proxyMsg = codec.decode(messageBytes);
+            if (proxyMsg == null) {
+                continue;
             }
+
+            // 取出所有 pending permits，合并后绑定到本条消息。
+            // 若一帧产生了多条消息（极少见），后续消息拿到 NOOP —— 信用已由第一条消息归还。
+            final FlowPermit msgPermit;
+            if (!pendingPermits.isEmpty()) {
+                msgPermit = FlowPermit.merge(new ArrayList<>(pendingPermits));
+                pendingPermits.clear();
+            } else {
+                msgPermit = FlowPermit.NOOP;
+            }
+
+            // 先写入 attr，再 fire —— ExchangeHandler 在同一 EventLoop 线程同步读取
+            ctx.channel().attr(PERMIT_KEY).set(msgPermit);
+            ctx.fireChannelRead(proxyMsg);
+
+            log.trace("Decoded ProxyMessage: type={}, requestId={}, dataLen={}",
+                    proxyMsg.getType(), proxyMsg.getRequestId(),
+                    proxyMsg.getData() != null ? proxyMsg.getData().length : 0);
         }
 
-        // 释放已读取的部分
+        // 释放已读取部分
         if (cumulation != null) {
             if (cumulation.readableBytes() == 0) {
                 cumulation.release();
@@ -121,16 +163,8 @@ public class ProxyMessageDecoder extends MessageToMessageDecoder<Http2DataFrame>
     }
 
     @Override
-    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
-        if (cumulation != null) {
-            cumulation.release();
-            cumulation = null;
-        }
-        super.handlerRemoved(ctx);
-    }
-
-    @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        releasePendingPermits();
         if (cumulation != null) {
             if (cumulation.readableBytes() > 0) {
                 log.warn("Channel inactive with {} bytes remaining in decoder buffer, discarding",
@@ -140,5 +174,33 @@ public class ProxyMessageDecoder extends MessageToMessageDecoder<Http2DataFrame>
             cumulation = null;
         }
         super.channelInactive(ctx);
+    }
+
+    @Override
+    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+        releasePendingPermits();
+        if (cumulation != null) {
+            cumulation.release();
+            cumulation = null;
+        }
+        super.handlerRemoved(ctx);
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        // 解码异常时释放未消耗的 permit，防止背压信用泄漏
+        releasePendingPermits();
+        if (cumulation != null) {
+            cumulation.release();
+            cumulation = null;
+        }
+        super.exceptionCaught(ctx, cause);
+    }
+
+    private void releasePendingPermits() {
+        for (FlowPermit p : pendingPermits) {
+            p.release();
+        }
+        pendingPermits.clear();
     }
 }

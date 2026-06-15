@@ -40,6 +40,10 @@
             <artifactId>snakeyaml</artifactId>
         </dependency>
         <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-resolver-dns</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
         </dependency>
@@ -118,9 +122,6 @@
                                 </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
                                     <resource>META-INF/proxy/com.proxy.common.filter.FilterChainBuilder</resource>
-                                </transformer>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
-                                    <resource>META-INF/proxy/com.proxy.transport.netty.StreamPipelineCustomizer</resource>
                                 </transformer>
                             </transformers>
                         </configuration>

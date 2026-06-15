@@ -1,0 +1,10 @@
+# 本机（macOS）开发期 cargo check/test 的链接设置。
+#
+# cdylib 在 macOS 上链接时，JNI 符号（如 JNI_OnLoad / 由 jni crate 引用的运行时符号）
+# 在编译宿主侧无法解析。dynamic_lookup 允许这些符号延迟到运行时由加载方提供，
+# 使桌面 `cargo check`/`cargo test` 能通过，不影响 Android（cargo-ndk）交叉编译。
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

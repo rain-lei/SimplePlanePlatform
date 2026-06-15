@@ -140,7 +140,8 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
                     ctx.pipeline().remove(HttpConnectHandler.this);
                     log.info("HTTP direct tunnel established: {}:{}", host, port);
                 } else {
-                    log.warn("HTTP direct connection failed for {}:{}", host, port);
+                    // 失败详情已由 DirectRelayHandler 节流告警，这里降为 debug，避免重试风暴刷屏
+                    log.debug("HTTP direct connection failed for {}:{}", host, port);
                     ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
                     ctx.close();
                 }
