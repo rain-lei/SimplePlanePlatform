@@ -11,6 +11,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 env:
   JAVA_VERSION: '17'
   RUST_VERSION: 'stable'
@@ -25,9 +28,6 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             artifact_name: SimplePlane_macos_arm64
-          - platform: macos-13
-            target: x86_64-apple-darwin
-            artifact_name: SimplePlane_macos_x64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: SimplePlane_windows_x64
@@ -161,12 +161,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
@@ -174,3 +168,4 @@ jobs:
           releaseBody: 'See the assets to download and install this version.'
           releaseDraft: true
           prerelease: false
+          args: --target ${{ matrix.target }}
