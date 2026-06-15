@@ -152,7 +152,7 @@ jobs:
         if: "!startsWith(github.ref, 'refs/tags/')"
         run: |
           cd desktop
-          cargo tauri build --target ${{ matrix.target }}
+          npx tauri build --target ${{ matrix.target }}
 
       # Step 5b: Build + Release (tag push only)
       - name: Build & Release Tauri Desktop App
