@@ -37,6 +37,7 @@ fn main() {
             commands::save_preset,
             commands::delete_preset,
             commands::apply_preset,
+            commands::import_servers,
             commands::reset_network,
             commands::get_logs,
             commands::get_logs_stream,

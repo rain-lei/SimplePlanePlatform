@@ -257,6 +257,13 @@ pub async fn apply_preset(
     Ok(format!("Preset '{}' applied", name))
 }
 
+/// 导入服务器配置（支持 YAML 格式）
+/// 前端传入 YAML 字符串，后端解析出服务器列表返回
+#[tauri::command]
+pub async fn import_servers(yaml_content: String) -> Result<Vec<config::RemoteConfig>, String> {
+    config::parse_servers_from_yaml(&yaml_content)
+}
+
 /// 紧急重置网络 —— 关闭代理、还原系统设置、恢复 DNS
 #[tauri::command]
 pub async fn reset_network(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
