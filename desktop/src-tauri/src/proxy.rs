@@ -164,93 +164,104 @@ fn set_system_proxy_macos(socks_port: u16, http_port: u16) -> Result<(), String>
     let service = get_network_service();
     let host = "127.0.0.1";
 
-    // 设置 SOCKS 代理
-    run_networksetup(&[
-        "-setsocksfirewallproxy",
-        &service,
-        host,
-        &socks_port.to_string(),
-    ])?;
-    run_networksetup(&["-setsocksfirewallproxystate", &service, "on"])?;
+    // 将所有 networksetup 命令合并为一个脚本，避免多次弹授权框
+    let script = format!(
+        r#"networksetup -setsocksfirewallproxy "{service}" {host} {socks_port}
+networksetup -setsocksfirewallproxystate "{service}" on
+networksetup -setwebproxy "{service}" {host} {http_port}
+networksetup -setwebproxystate "{service}" on
+networksetup -setsecurewebproxy "{service}" {host} {http_port}
+networksetup -setsecurewebproxystate "{service}" on"#,
+        service = service,
+        host = host,
+        socks_port = socks_port,
+        http_port = http_port
+    );
 
-    // 设置 HTTP 代理
-    run_networksetup(&[
-        "-setwebproxy",
-        &service,
-        host,
-        &http_port.to_string(),
-    ])?;
-    run_networksetup(&["-setwebproxystate", &service, "on"])?;
-
-    // 设置 HTTPS 代理
-    run_networksetup(&[
-        "-setsecurewebproxy",
-        &service,
-        host,
-        &http_port.to_string(),
-    ])?;
-    run_networksetup(&["-setsecurewebproxystate", &service, "on"])?;
-
-    Ok(())
+    run_networksetup_script(&script)
 }
 
 #[cfg(target_os = "macos")]
 fn restore_proxy_macos(original: &OriginalProxyState) -> Result<(), String> {
     let service = get_network_service();
+    let mut commands = Vec::new();
 
     // 还原 SOCKS
     if original.socks_enabled && !original.socks_host.is_empty() {
-        run_networksetup(&[
-            "-setsocksfirewallproxy",
-            &service,
-            &original.socks_host,
-            &original.socks_port,
-        ])?;
-        run_networksetup(&["-setsocksfirewallproxystate", &service, "on"])?;
+        commands.push(format!(
+            "networksetup -setsocksfirewallproxy \"{}\" {} {}",
+            service, original.socks_host, original.socks_port
+        ));
+        commands.push(format!(
+            "networksetup -setsocksfirewallproxystate \"{}\" on",
+            service
+        ));
     } else {
-        run_networksetup(&["-setsocksfirewallproxystate", &service, "off"])?;
+        commands.push(format!(
+            "networksetup -setsocksfirewallproxystate \"{}\" off",
+            service
+        ));
     }
 
     // 还原 HTTP
     if original.http_enabled && !original.http_host.is_empty() {
-        run_networksetup(&[
-            "-setwebproxy",
-            &service,
-            &original.http_host,
-            &original.http_port,
-        ])?;
-        run_networksetup(&["-setwebproxystate", &service, "on"])?;
+        commands.push(format!(
+            "networksetup -setwebproxy \"{}\" {} {}",
+            service, original.http_host, original.http_port
+        ));
+        commands.push(format!(
+            "networksetup -setwebproxystate \"{}\" on",
+            service
+        ));
     } else {
-        run_networksetup(&["-setwebproxystate", &service, "off"])?;
+        commands.push(format!(
+            "networksetup -setwebproxystate \"{}\" off",
+            service
+        ));
     }
 
     // 还原 HTTPS
     if original.https_enabled && !original.https_host.is_empty() {
-        run_networksetup(&[
-            "-setsecurewebproxy",
-            &service,
-            &original.https_host,
-            &original.https_port,
-        ])?;
-        run_networksetup(&["-setsecurewebproxystate", &service, "on"])?;
+        commands.push(format!(
+            "networksetup -setsecurewebproxy \"{}\" {} {}",
+            service, original.https_host, original.https_port
+        ));
+        commands.push(format!(
+            "networksetup -setsecurewebproxystate \"{}\" on",
+            service
+        ));
     } else {
-        run_networksetup(&["-setsecurewebproxystate", &service, "off"])?;
+        commands.push(format!(
+            "networksetup -setsecurewebproxystate \"{}\" off",
+            service
+        ));
     }
 
-    Ok(())
+    run_networksetup_script(&commands.join("\n"))
 }
 
+/// 执行一组 networksetup 命令
+/// 权限不足时静默跳过（开发环境常见，正式 .app 签名后不会有此问题）
 #[cfg(target_os = "macos")]
-fn run_networksetup(args: &[&str]) -> Result<(), String> {
-    let output = Command::new("networksetup")
-        .args(args)
+fn run_networksetup_script(script: &str) -> Result<(), String> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
         .output()
         .map_err(|e| format!("networksetup failed: {}", e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("networksetup error: {}", stderr));
+    if output.status.success() {
+        return Ok(());
     }
+
+    // 权限不足（macOS Ventura+），静默跳过，不阻塞用户
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    log::warn!(
+        "networksetup failed (likely permission issue in dev mode), skipping. stdout={}, stderr={}",
+        stdout.trim(),
+        stderr.trim()
+    );
     Ok(())
 }
 

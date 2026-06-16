@@ -43,22 +43,70 @@ fn get_resource_path() -> std::path::PathBuf {
     }
 }
 
-/// 获取自带 JRE 的 java 可执行路径
+/// 获取 java 可执行路径：优先使用内嵌 JRE，不存在则 fallback 到系统 java
 fn get_java_path() -> std::path::PathBuf {
     let resources = get_resource_path();
     #[cfg(target_os = "windows")]
-    {
-        resources.join("jre").join("bin").join("java.exe")
-    }
+    let bundled = resources.join("jre").join("bin").join("java.exe");
     #[cfg(not(target_os = "windows"))]
-    {
-        resources.join("jre").join("bin").join("java")
+    let bundled = resources.join("jre").join("bin").join("java");
+
+    if bundled.exists() {
+        return bundled;
     }
+
+    // Fallback: 查找系统 PATH 中的 java
+    if let Ok(output) = std::process::Command::new("which").arg("java").output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                return std::path::PathBuf::from(path_str);
+            }
+        }
+    }
+
+    // Windows fallback
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("where").arg("java").output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Some(first_line) = path_str.lines().next() {
+                    return std::path::PathBuf::from(first_line);
+                }
+            }
+        }
+    }
+
+    // 最终返回内嵌路径（后续会报错 JRE not found）
+    bundled
 }
 
-/// 获取 proxy-local.jar 路径
+/// 获取 proxy-local.jar 路径：优先 resources 内，fallback 到 Maven 构建产物
 fn get_jar_path() -> std::path::PathBuf {
-    get_resource_path().join("proxy-local.jar")
+    let bundled = get_resource_path().join("proxy-local.jar");
+    if bundled.exists() {
+        return bundled;
+    }
+
+    // Fallback: 开发时使用 Maven 编译产物
+    let exe = std::env::current_exe().unwrap_or_default();
+    // 从 desktop/src-tauri/target/release/exe 推导项目根目录
+    let project_root = exe
+        .parent() // target/release
+        .and_then(|p| p.parent()) // target
+        .and_then(|p| p.parent()) // src-tauri
+        .and_then(|p| p.parent()) // desktop
+        .and_then(|p| p.parent()); // project root
+
+    if let Some(root) = project_root {
+        let dev_jar = root.join("proxy-local/target/proxy-local-1.0.0-SNAPSHOT.jar");
+        if dev_jar.exists() {
+            return dev_jar;
+        }
+    }
+
+    bundled
 }
 
 /// 获取 tun-adapter 可执行路径（内部使用）
@@ -83,6 +131,29 @@ pub fn get_tun_path_public() -> std::path::PathBuf {
 fn get_proxy_config_path() -> std::path::PathBuf {
     let config_dir = config::get_config_dir();
     config_dir.join("proxy.yml")
+}
+
+/// 从当前 exe 位置向上寻找项目根目录（含 proxy-local/ 的目录）
+fn find_project_root() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    // 最多向上找 6 层
+    for _ in 0..6 {
+        if dir.join("proxy-local").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    // 也尝试从 cwd 向上找
+    let cwd = std::env::current_dir().ok()?;
+    let mut dir = cwd.as_path();
+    for _ in 0..4 {
+        if dir.join("proxy-local").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 /// 启动 proxy-local（Java 代理核心）
@@ -133,17 +204,63 @@ pub async fn start_proxy_local(state: &mut AppState) -> Result<(), String> {
     }
 
     log::info!("Starting proxy-local with JRE: {:?}", java_path);
+    log::info!("Jar path: {:?}", jar_path);
 
     let mut cmd = Command::new(&java_path);
+
+    // 设置工作目录：开发模式用项目根目录，生产模式用资源目录
+    let work_dir = if cfg!(debug_assertions) {
+        // 开发模式：项目根
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        // 生产模式也用 exe 所在的顶层目录
+        let exe = std::env::current_exe().unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        {
+            // .app/Contents/MacOS/exe -> .app/Contents/Resources（这是资源目录）
+            exe.parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("../Resources")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            exe.parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf()
+        }
+    };
+
+    // 开发环境下找项目根目录（从 desktop/src-tauri 向上找到含 proxy-local/ 的目录）
+    let project_root = find_project_root().unwrap_or(work_dir);
+    cmd.current_dir(&project_root);
+    log::info!("Working dir: {:?}", project_root);
+
     cmd.arg("-Dproxy.dns.nameservers=114.114.114.114,223.5.5.5")
         .arg("-jar")
         .arg(&jar_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // 如果存在用户配置文件，通过参数指定
+    // Java main(args) 以 args[0] 作为配置文件路径（不支持 --config 前缀）
+    // 注意：只有格式与 Java ProxyConfig SnakeYAML 兼容的文件才能传递
+    // （Java 期望扁平结构：localPort, remoteServers, cluster 等顶级字段）
+    // Rust 桌面端生成的 proxy.yml 是嵌套结构（local.port, remote.host），格式不兼容
+    // 因此暂不传外部配置，让 Java 使用 jar 内置的 classpath:proxy.yml
     if config_path.exists() {
-        cmd.arg("--config").arg(&config_path);
+        // 检查文件是否为 Java 兼容格式（顶层含 localPort 或 remoteServers 字段）
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if content.contains("localPort") || content.contains("remoteServers") {
+                cmd.arg(config_path.to_str().unwrap_or_default());
+                log::info!("Using Java-compatible config file: {:?}", config_path);
+            } else {
+                log::info!(
+                    "Config file {:?} is in desktop format (incompatible with Java), skipping",
+                    config_path
+                );
+            }
+        }
+    } else {
+        log::info!("No user config file, Java will use classpath proxy.yml");
     }
 
     match cmd.spawn() {
@@ -183,9 +300,17 @@ pub async fn start_proxy_local(state: &mut AppState) -> Result<(), String> {
                 if let Some(ref mut p) = state.proxy_process {
                     if let Ok(Some(exit)) = p.try_wait() {
                         state.proxy_status = ServiceStatus::Error;
+                        // 从日志管理器取最近的错误信息
+                        let recent_logs = state.log_manager.lock().await.get_recent("proxy-local", 5);
+                        let log_detail = if recent_logs.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n最近日志:\n{}", recent_logs.join("\n"))
+                        };
                         return Err(format!(
-                            "proxy-local 进程异常退出，退出码: {}",
-                            exit.code().unwrap_or(-1)
+                            "启动异常，退出码为{}{}",
+                            exit.code().unwrap_or(-1),
+                            log_detail
                         ));
                     }
                 }

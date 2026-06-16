@@ -47,7 +47,15 @@ pub async fn connect(
     // 2. 根据模式设置系统代理或启动 TUN
     match proxy_mode {
         ProxyMode::System => {
-            proxy::set_system_proxy(&mut s).await?;
+            if let Err(e) = proxy::set_system_proxy(&mut s).await {
+                // 系统代理设置失败不是致命错误，代理核心已经在运行
+                // 用户可以手动配置系统代理指向 127.0.0.1:1080
+                log::warn!("Failed to set system proxy (non-fatal): {}", e);
+                s.log_manager
+                    .lock()
+                    .await
+                    .push("warning", "proxy", &format!("系统代理设置失败（代理已启动，可手动配置）: {}", e));
+            }
         }
         ProxyMode::Tun => {
             match process::start_tun_adapter(&mut s).await {
@@ -56,7 +64,9 @@ pub async fn connect(
                     // TUN 失败，降级到系统代理模式
                     log::warn!("TUN failed, falling back to system proxy: {}", e);
                     s.proxy_mode = ProxyMode::System;
-                    proxy::set_system_proxy(&mut s).await?;
+                    if let Err(proxy_err) = proxy::set_system_proxy(&mut s).await {
+                        log::warn!("System proxy fallback also failed: {}", proxy_err);
+                    }
                     return Ok(format!(
                         "TUN 模式启动失败，已降级到系统代理模式。原因：{}",
                         e

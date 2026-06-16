@@ -73,6 +73,24 @@ impl LogManager {
             .collect()
     }
 
+    /// 获取指定服务最近 N 条日志的文本内容（用于错误诊断）
+    pub fn get_recent(&self, service: &str, count: usize) -> Vec<String> {
+        let filtered: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|e| e.service == service)
+            .collect();
+        let start = if filtered.len() > count {
+            filtered.len() - count
+        } else {
+            0
+        };
+        filtered[start..]
+            .iter()
+            .map(|e| e.message.clone())
+            .collect()
+    }
+
     /// 清空指定服务的日志
     pub fn clear(&mut self, service: Option<&str>) {
         if let Some(s) = service {
@@ -84,11 +102,17 @@ impl LogManager {
 }
 
 /// 启动子进程的 stdout/stderr 读取线程，实时将输出写入日志管理器
+/// 使用 tokio::spawn 配合 blocking read 避免死锁
 pub fn spawn_log_reader<R: Read + Send + 'static>(
     reader_source: R,
     service: String,
     log_manager: Arc<Mutex<LogManager>>,
 ) {
+    // 使用 tokio::task::spawn_blocking 把阻塞IO放到专用线程池
+    // 再通过 channel 发回 tokio 异步任务写入日志
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+
+    // 阻塞读线程
     std::thread::spawn(move || {
         let reader = BufReader::new(reader_source);
         for line in reader.lines() {
@@ -98,19 +122,21 @@ pub fn spawn_log_reader<R: Read + Send + 'static>(
                         continue;
                     }
                     let level = classify_log_level(&text);
-                    let mgr = log_manager.clone();
-                    let svc = service.clone();
-                    // 用 block_on 写入（日志线程不在 tokio runtime 内）
-                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                        rt.block_on(async {
-                            mgr.lock().await.push(&level, &svc, &text);
-                        });
-                    } else {
-                        // fallback: 不在 tokio 运行时中，跳过
+                    // 通过 channel 发送，永不阻塞
+                    if tx.send((level, text)).is_err() {
+                        break;
                     }
                 }
                 Err(_) => break,
             }
+        }
+    });
+
+    // 异步接收任务，写入日志管理器
+    let svc = service;
+    tokio::spawn(async move {
+        while let Some((level, text)) = rx.recv().await {
+            log_manager.lock().await.push(&level, &svc, &text);
         }
     });
 }
