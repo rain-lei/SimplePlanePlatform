@@ -19,25 +19,35 @@ echo "Resources:    $RESOURCES_DIR"
 # 清理并重建 resources 目录（保留 jre/ 如果已存在）
 mkdir -p "$RESOURCES_DIR"
 
-# 1. 复制 fat-jar
+# 1. 复制 fat-jar（必需）
 FAT_JAR="$PROJECT_ROOT/proxy-local/target/proxy-local-1.0.0-SNAPSHOT.jar"
 if [ -f "$FAT_JAR" ]; then
     cp "$FAT_JAR" "$RESOURCES_DIR/proxy-local.jar"
     echo "[OK] proxy-local.jar ($(du -h "$RESOURCES_DIR/proxy-local.jar" | cut -f1))"
 else
-    echo "[WARN] proxy-local.jar not found at $FAT_JAR"
-    echo "       Run: mvn package -pl proxy-local -am -DskipTests"
+    echo "[ERROR] proxy-local.jar not found at $FAT_JAR"
+    echo "        Run: mvn package -pl proxy-local -am -DskipTests"
+    exit 1
 fi
 
 # 2. 复制 tun-adapter 二进制
+# 支持两种路径：直接 release 或带 target triple（CI 中 --target 指定时）
 TUN_BIN="$PROJECT_ROOT/tun-adapter/target/release/tun-adapter"
+if [ ! -f "$TUN_BIN" ]; then
+    # 尝试带 target triple 的路径（CI 中 cargo build --release --target xxx）
+    for candidate in "$PROJECT_ROOT"/tun-adapter/target/*/release/tun-adapter; do
+        if [ -f "$candidate" ]; then
+            TUN_BIN="$candidate"
+            break
+        fi
+    done
+fi
 if [ -f "$TUN_BIN" ]; then
     cp "$TUN_BIN" "$RESOURCES_DIR/tun-adapter"
     chmod +x "$RESOURCES_DIR/tun-adapter"
     echo "[OK] tun-adapter ($(du -h "$RESOURCES_DIR/tun-adapter" | cut -f1))"
 else
-    echo "[WARN] tun-adapter not found at $TUN_BIN"
-    echo "       Run: cd tun-adapter && cargo build --release"
+    echo "[WARN] tun-adapter not found (non-fatal, TUN mode won't work)"
 fi
 
 # 3. 复制 Web UI 静态资源

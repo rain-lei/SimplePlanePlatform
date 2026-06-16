@@ -37,7 +37,11 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/**/*"
+      "resources/proxy-local.jar",
+      "resources/jre/**/*",
+      "resources/web/**/*",
+      "resources/config-templates/**/*",
+      "resources/tun-adapter*"
     ],
     "macOS": {
       "minimumSystemVersion": "10.15"
