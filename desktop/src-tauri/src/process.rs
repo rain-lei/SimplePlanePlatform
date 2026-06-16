@@ -18,26 +18,27 @@ pub fn is_port_listening(port: u16) -> bool {
 
 /// 获取资源目录路径
 fn get_resource_path() -> std::path::PathBuf {
-    // 开发模式下使用相对路径
-    if cfg!(debug_assertions) {
-        std::path::PathBuf::from("resources")
-    } else {
-        // 生产模式下，资源在 app bundle 内
-        let exe = std::env::current_exe().unwrap_or_default();
-        let exe_dir = exe.parent().unwrap_or(std::path::Path::new("."));
+// 开发模式下使用相对路径
+if cfg!(debug_assertions) {
+std::path::PathBuf::from("resources")
+} else {
+// 生产模式下，资源在 app bundle 内
+let exe = std::env::current_exe().unwrap_or_default();
+let exe_dir = exe.parent().unwrap_or(std::path::Path::new("."));
 
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: AppName.app/Contents/MacOS/executable -> ../Resources
-            exe_dir.join("../Resources")
-        }
-        #[cfg(target_os = "windows")]
-        {
-            // Windows: 安装目录/executable -> ./resources
-            exe_dir.join("resources")
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
+#[cfg(target_os = "macos")]
+{
+// macOS: AppName.app/Contents/MacOS/executable -> ../Resources/resources/
+// Tauri 将 bundle.resources 中的文件放在 Contents/Resources/resources/ 下
+exe_dir.join("../Resources/resources")
+}
+#[cfg(target_os = "windows")]
+{
+// Windows: 安装目录/executable -> ./resources
+exe_dir.join("resources")
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+{
             exe_dir.join("resources")
         }
     }
