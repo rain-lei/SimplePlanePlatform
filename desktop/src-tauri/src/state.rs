@@ -64,7 +64,7 @@ impl Default for AppState {
             tun_status: ServiceStatus::Stopped,
             proxy_mode: ProxyMode::System,
             proxy_port: 1080,
-            http_port: 1087,
+            http_port: 1080,
             original_proxy_state: None,
             log_manager: Arc::new(Mutex::new(LogManager::new(2000))),
             proxy_external: false,

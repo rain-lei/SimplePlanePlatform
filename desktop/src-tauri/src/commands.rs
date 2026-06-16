@@ -390,7 +390,7 @@ fn get_builtin_presets() -> Vec<Preset> {
                 local: config::LocalConfig {
                     port: 1080,
                     http_proxy_enabled: true,
-                    http_proxy_port: 1087,
+                    http_proxy_port: 1080,
                 },
                 remote: config::RemoteConfig {
                     host: "54.234.196.30".to_string(),
@@ -419,7 +419,7 @@ fn get_builtin_presets() -> Vec<Preset> {
                 local: config::LocalConfig {
                     port: 1080,
                     http_proxy_enabled: true,
-                    http_proxy_port: 1087,
+                    http_proxy_port: 1080,
                 },
                 remote: config::RemoteConfig {
                     host: "54.234.196.30".to_string(),

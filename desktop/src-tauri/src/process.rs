@@ -128,11 +128,6 @@ pub fn get_tun_path_public() -> std::path::PathBuf {
     get_tun_path()
 }
 
-/// 获取 proxy 配置文件路径
-fn get_proxy_config_path() -> std::path::PathBuf {
-    let config_dir = config::get_config_dir();
-    config_dir.join("proxy.yml")
-}
 
 /// 从当前 exe 位置向上寻找项目根目录（含 proxy-local/ 的目录）
 fn find_project_root() -> Option<std::path::PathBuf> {
@@ -192,7 +187,6 @@ pub async fn start_proxy_local(state: &mut AppState) -> Result<(), String> {
 
     let java_path = get_java_path();
     let jar_path = get_jar_path();
-    let config_path = get_proxy_config_path();
 
     if !java_path.exists() {
         state.proxy_status = ServiceStatus::Error;
@@ -242,26 +236,17 @@ pub async fn start_proxy_local(state: &mut AppState) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Java main(args) 以 args[0] 作为配置文件路径（不支持 --config 前缀）
-    // 注意：只有格式与 Java ProxyConfig SnakeYAML 兼容的文件才能传递
-    // （Java 期望扁平结构：localPort, remoteServers, cluster 等顶级字段）
-    // Rust 桌面端生成的 proxy.yml 是嵌套结构（local.port, remote.host），格式不兼容
-    // 因此暂不传外部配置，让 Java 使用 jar 内置的 classpath:proxy.yml
-    if config_path.exists() {
-        // 检查文件是否为 Java 兼容格式（顶层含 localPort 或 remoteServers 字段）
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            if content.contains("localPort") || content.contains("remoteServers") {
-                cmd.arg(config_path.to_str().unwrap_or_default());
-                log::info!("Using Java-compatible config file: {:?}", config_path);
-            } else {
-                log::info!(
-                    "Config file {:?} is in desktop format (incompatible with Java), skipping",
-                    config_path
-                );
-            }
+    // 生成 Java 兼容格式的配置文件（扁平驼峰命名：localPort, remoteServers 等）
+    // Rust 桌面端的 proxy.yml 是嵌套蛇形格式，与 Java 不兼容
+    // 因此转换为 proxy-java.yml 单独给 Java 进程使用
+    match config::write_java_config() {
+        Ok(java_config_path) => {
+            cmd.arg(java_config_path.to_str().unwrap_or_default());
+            log::info!("Generated Java-compatible config: {:?}", java_config_path);
         }
-    } else {
-        log::info!("No user config file, Java will use classpath proxy.yml");
+        Err(e) => {
+            log::warn!("Failed to generate Java config, using jar defaults: {}", e);
+        }
     }
 
     match cmd.spawn() {
@@ -490,10 +475,20 @@ pub async fn start_tun_adapter(state: &mut AppState) -> Result<(), String> {
                     if let Ok(Some(exit)) = p.try_wait() {
                         state.tun_status = ServiceStatus::Error;
                         let code = exit.code().unwrap_or(-1);
-                        return Err(classify_tun_error(&format!(
-                            "进程退出，退出码 {}",
-                            code
-                        )));
+                        // 尝试从日志中获取实际错误信息
+                        let recent_logs = state.log_manager.lock().await
+                            .get_recent("tun-adapter", 5);
+                        let stderr_content = recent_logs.join("\n");
+                        // 用实际错误内容分类，如果日志为空则用退出码
+                        let error_input = if stderr_content.contains("not permitted")
+                            || stderr_content.contains("password")
+                            || stderr_content.contains("Operation not permitted")
+                        {
+                            stderr_content.clone()
+                        } else {
+                            format!("进程退出，退出码 {}。{}", code, stderr_content)
+                        };
+                        return Err(classify_tun_error(&error_input));
                     }
                 }
 
@@ -675,6 +670,20 @@ tun_path_str
 "TUN 设备或地址冲突：可能有另一个 VPN 或 TUN 实例在运行。\n\
 请先关闭其他 VPN 软件再重试。"
 .to_string()
+} else if err_lower.contains("退出码 1") || err_lower.contains("exit code 1") {
+// 退出码 1 最常见原因是权限不足
+let tun_path = get_tun_path();
+let tun_path_str = tun_path.to_string_lossy();
+format!(
+"TUN 启动失败（退出码 1），最可能的原因是权限不足。\n\n\
+请在终端执行以下命令配置免密 sudo（仅需一次）：\n\n\
+  sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
+添加一行：\n\n\
+  {} ALL=(ALL) NOPASSWD: {}\n\n\
+保存退出后重试。",
+std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
+tun_path_str
+)
 } else {
 format!("TUN 启动失败：{}", error)
 }

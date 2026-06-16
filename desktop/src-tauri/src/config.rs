@@ -43,7 +43,7 @@ pub struct RouteConfig {
 
 fn default_socks_port() -> u16 { 1080 }
 fn default_http_enabled() -> bool { true }
-fn default_http_port() -> u16 { 1087 }
+fn default_http_port() -> u16 { 1080 }
 fn default_cipher() -> String { "chacha20".to_string() }
 fn default_route_mode() -> String { "proxy".to_string() }
 
@@ -249,7 +249,7 @@ fn get_default_proxy_config() -> ProxyConfig {
         local: LocalConfig {
             port: 1080,
             http_proxy_enabled: true,
-            http_proxy_port: 1087,
+            http_proxy_port: 1080,
         },
         remote: RemoteConfig {
             host: "54.234.196.30".to_string(),
@@ -333,4 +333,65 @@ fn get_default_tun_config() -> TunConfig {
             dns_bypass_ips: vec!["114.114.114.114".to_string(), "223.5.5.5".to_string()],
         }),
     }
+}
+
+/// 将 ProxyConfig 转为 Java 兼容的 YAML 格式字符串
+/// Java 的 ProxyConfig 使用扁平驼峰命名：localPort, remoteServers, httpProxyEnabled 等
+pub fn generate_java_compatible_yaml(config: &ProxyConfig) -> String {
+    let mut yaml = String::new();
+
+    // localPort
+    yaml.push_str(&format!("localPort: {}\n", config.local.port));
+
+    // remoteServers (Java 支持多服务器列表)
+    yaml.push_str("remoteServers:\n");
+    yaml.push_str(&format!("  - host: {}\n", config.remote.host));
+    yaml.push_str(&format!("    port: {}\n", config.remote.port));
+    yaml.push_str(&format!("    cipher: {}\n", config.remote.cipher));
+    yaml.push_str(&format!("    cipherKey: \"{}\"\n", config.remote.key));
+    yaml.push_str("    ssl: false\n");
+
+    // cluster & loadBalance
+    yaml.push_str("cluster: failover\n");
+    yaml.push_str("loadBalance: roundrobin\n");
+    yaml.push_str("timeoutMs: 8000\n");
+    yaml.push_str("connectionsPerNode: 1\n");
+
+    // httpProxyEnabled
+    yaml.push_str(&format!("httpProxyEnabled: {}\n", config.local.http_proxy_enabled));
+
+    // route
+    yaml.push_str("route:\n");
+    yaml.push_str(&format!("  defaultRoute: {}\n", config.route.default_route));
+
+    if !config.route.proxy_list.is_empty() {
+        yaml.push_str("  proxyList:\n");
+        for item in &config.route.proxy_list {
+            yaml.push_str(&format!("    - \"{}\"\n", item));
+        }
+    }
+
+    if !config.route.direct_list.is_empty() {
+        yaml.push_str("  directList:\n");
+        for item in &config.route.direct_list {
+            yaml.push_str(&format!("    - \"{}\"\n", item));
+        }
+    }
+
+    // systemProxy
+    yaml.push_str("systemProxy:\n");
+    yaml.push_str("  enabled: false\n");
+    yaml.push_str(&format!("  host: 127.0.0.1\n"));
+
+    yaml
+}
+
+/// 生成 Java 兼容配置文件并写入磁盘，返回文件路径
+pub fn write_java_config() -> Result<PathBuf, String> {
+    let config = load_proxy_config()?;
+    let java_yaml = generate_java_compatible_yaml(&config);
+    let java_config_path = get_config_dir().join("proxy-java.yml");
+    fs::write(&java_config_path, java_yaml)
+        .map_err(|e| format!("Failed to write Java config: {}", e))?;
+    Ok(java_config_path)
 }
