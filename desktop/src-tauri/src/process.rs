@@ -441,7 +441,14 @@ pub async fn start_tun_adapter(state: &mut AppState) -> Result<(), String> {
         return Err(format!("tun-adapter not found at: {:?}", tun_path));
     }
 
+    // 确保 tun.toml 配置文件存在（首次运行自动生成默认配置）
     let tun_config_path = config::get_config_dir().join("tun.toml");
+    if !tun_config_path.exists() {
+        log::info!("tun.toml not found, generating default config");
+        if let Err(e) = config::load_tun_config() {
+            log::warn!("Failed to generate default tun.toml: {}", e);
+        }
+    }
 
     log::info!("Starting tun-adapter: {:?}", tun_path);
     state
@@ -450,7 +457,7 @@ pub async fn start_tun_adapter(state: &mut AppState) -> Result<(), String> {
         .await
         .push("info", "tun-adapter", "正在启动 TUN adapter...");
 
-    // TUN 需要提权运行
+    // TUN 需要提权运行（macOS/Linux 需要 sudo）
     let child_result = start_tun_with_privilege(&tun_path, &tun_config_path);
 
     match child_result {
@@ -628,29 +635,46 @@ pub async fn stop_tun_adapter(state: &mut AppState) -> Result<(), String> {
 
 /// 分类 TUN 启动错误（对标 server.js 的 classifySudoFailure，增强版）
 fn classify_tun_error(error: &str) -> String {
-    let err_lower = error.to_lowercase();
-    if err_lower.contains("password is required")
-        || err_lower.contains("sudo: a password is required")
-    {
-        "TUN 模式需要管理员授权。请先在终端执行一次 sudo 命令完成授权，或在系统设置中配置免密。\n\
-         修复方法：在终端运行\n  sudo echo ok\n然后重试。或配置永久免密（参见 TUN 诊断面板）。"
-            .to_string()
-    } else if err_lower.contains("operation not permitted")
-        || err_lower.contains("permission denied")
-    {
-        "权限不足：无法创建 TUN 设备。可能原因：\n\
-         1. macOS 沙箱限制（从 Finder 双击运行时）\n\
-         2. sudoers 规则未配置\n\
-         建议从终端启动应用或配置 sudoers 免密规则。"
-            .to_string()
-    } else if err_lower.contains("no such file") || err_lower.contains("not found") {
-        "tun-adapter 二进制文件缺失，请重新安装软件。".to_string()
-    } else if err_lower.contains("address already in use") || err_lower.contains("already exists")
-    {
-        "TUN 设备或地址冲突：可能有另一个 VPN 或 TUN 实例在运行。\n\
-         请先关闭其他 VPN 软件再重试。"
-            .to_string()
-    } else {
-        format!("TUN 启动失败：{}", error)
-    }
+let err_lower = error.to_lowercase();
+if err_lower.contains("password is required")
+|| err_lower.contains("sudo: a password is required")
+|| err_lower.contains("sudo: a terminal is required")
+{
+let tun_path = get_tun_path();
+let tun_path_str = tun_path.to_string_lossy();
+format!(
+"TUN 模式需要免密 sudo 权限，当前未配置。\n\n\
+请在终端执行以下命令配置免密（仅需一次）：\n\n\
+  sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
+在打开的编辑器中添加一行：\n\n\
+  {} ALL=(ALL) NOPASSWD: {}\n\n\
+保存退出后重试即可。",
+std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
+tun_path_str
+)
+} else if err_lower.contains("operation not permitted")
+|| err_lower.contains("permission denied")
+{
+let tun_path = get_tun_path();
+let tun_path_str = tun_path.to_string_lossy();
+format!(
+"权限不足：无法创建 TUN 设备。\n\n\
+请在终端配置 sudoers 免密规则：\n\n\
+  sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
+添加内容：\n\n\
+  {} ALL=(ALL) NOPASSWD: {}\n\n\
+保存后重试。",
+std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
+tun_path_str
+)
+} else if err_lower.contains("no such file") || err_lower.contains("not found") {
+"tun-adapter 二进制文件缺失，请重新安装软件。".to_string()
+} else if err_lower.contains("address already in use") || err_lower.contains("already exists")
+{
+"TUN 设备或地址冲突：可能有另一个 VPN 或 TUN 实例在运行。\n\
+请先关闭其他 VPN 软件再重试。"
+.to_string()
+} else {
+format!("TUN 启动失败：{}", error)
+}
 }
