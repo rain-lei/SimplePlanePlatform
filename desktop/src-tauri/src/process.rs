@@ -546,14 +546,52 @@ fn start_tun_with_privilege(
     tun_path: &std::path::Path,
     config_path: &std::path::Path,
 ) -> Result<Child, String> {
-    // Windows: 通过 manifest 提权或 runas
-    Command::new(tun_path)
+    // Windows 策略：
+    // 1. 先尝试直接启动（主程序已经是管理员时可行）
+    // 2. 如果失败且是权限错误(740)，尝试通过计划任务启动
+    // 3. 都不行则返回提示让用户手动配置
+
+    match Command::new(tun_path)
         .arg("--config")
         .arg(config_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("tun-adapter spawn failed: {}", e))
+    {
+        Ok(child) => Ok(child),
+        Err(e) => {
+            let is_elevation_error = e.raw_os_error() == Some(740); // ERROR_ELEVATION_REQUIRED
+            if is_elevation_error {
+                // 尝试通过预配置的计划任务启动
+                log::info!("Direct spawn requires elevation, trying scheduled task...");
+                let task_result = Command::new("schtasks")
+                    .args(["/Run", "/TN", "SimplePlane-TUN"])
+                    .output();
+
+                match task_result {
+                    Ok(output) if output.status.success() => {
+                        // 计划任务触发成功，但我们无法获取子进程句柄
+                        // 返回一个 dummy 进程用于状态追踪（通过 is_tun_running 检测）
+                        // 这里返回错误让上层通过轮询 is_tun_running() 来确认
+                        log::info!("Scheduled task triggered successfully");
+                        // 启动一个 ping 占位进程（马上会被检测逻辑跳过）
+                        Command::new("cmd")
+                            .args(["/c", "timeout /t 30 /nobreak >nul"])
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn()
+                            .map_err(|e2| format!("placeholder process failed: {}", e2))
+                    }
+                    _ => {
+                        // 计划任务未配置或执行失败
+                        Err("elevation required".to_string())
+                    }
+                }
+            } else {
+                Err(format!("tun-adapter spawn failed: {}", e))
+            }
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -631,60 +669,67 @@ pub async fn stop_tun_adapter(state: &mut AppState) -> Result<(), String> {
 
 /// 分类 TUN 启动错误（对标 server.js 的 classifySudoFailure，增强版）
 fn classify_tun_error(error: &str) -> String {
-let err_lower = error.to_lowercase();
-if err_lower.contains("password is required")
-|| err_lower.contains("sudo: a password is required")
-|| err_lower.contains("sudo: a terminal is required")
-{
-let tun_path = get_tun_path();
-let tun_path_str = tun_path.to_string_lossy();
-format!(
-"TUN 模式需要免密 sudo 权限，当前未配置。\n\n\
-请在终端执行以下命令配置免密（仅需一次）：\n\n\
-  sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
-在打开的编辑器中添加一行：\n\n\
-  {} ALL=(ALL) NOPASSWD: {}\n\n\
-保存退出后重试即可。",
-std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
-tun_path_str
-)
-} else if err_lower.contains("operation not permitted")
-|| err_lower.contains("permission denied")
-{
-let tun_path = get_tun_path();
-let tun_path_str = tun_path.to_string_lossy();
-format!(
-"权限不足：无法创建 TUN 设备。\n\n\
-请在终端配置 sudoers 免密规则：\n\n\
-  sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
-添加内容：\n\n\
-  {} ALL=(ALL) NOPASSWD: {}\n\n\
-保存后重试。",
-std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
-tun_path_str
-)
-} else if err_lower.contains("no such file") || err_lower.contains("not found") {
-"tun-adapter 二进制文件缺失，请重新安装软件。".to_string()
-} else if err_lower.contains("address already in use") || err_lower.contains("already exists")
-{
-"TUN 设备或地址冲突：可能有另一个 VPN 或 TUN 实例在运行。\n\
-请先关闭其他 VPN 软件再重试。"
-.to_string()
-} else if err_lower.contains("退出码 1") || err_lower.contains("exit code 1") {
-// 退出码 1 最常见原因是权限不足
-let tun_path = get_tun_path();
-let tun_path_str = tun_path.to_string_lossy();
-format!(
-"TUN 启动失败（退出码 1），最可能的原因是权限不足。\n\n\
-请在终端执行以下命令配置免密 sudo（仅需一次）：\n\n\
-  sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
-添加一行：\n\n\
-  {} ALL=(ALL) NOPASSWD: {}\n\n\
-保存退出后重试。",
-std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
-tun_path_str
-)
-} else {
-format!("TUN 启动失败：{}", error)
+    let err_lower = error.to_lowercase();
+
+    if err_lower.contains("no such file") || err_lower.contains("not found") {
+        return "tun-adapter 二进制文件缺失，请重新安装软件。".to_string();
+    }
+
+    if err_lower.contains("address already in use") || err_lower.contains("already exists") {
+        return "TUN 设备或地址冲突：可能有另一个 VPN 或 TUN 实例在运行。\n\
+            请先关闭其他 VPN 软件再重试。".to_string();
+    }
+
+    // 权限相关错误：根据平台给出不同提示
+    let is_permission_error = err_lower.contains("password is required")
+        || err_lower.contains("sudo: a password is required")
+        || err_lower.contains("sudo: a terminal is required")
+        || err_lower.contains("operation not permitted")
+        || err_lower.contains("permission denied")
+        || err_lower.contains("elevation required")
+        || err_lower.contains("requires elevation")
+        || err_lower.contains("退出码 1")
+        || err_lower.contains("exit code 1")
+        || err_lower.contains("os error 740");
+
+    if is_permission_error {
+        return get_permission_error_message();
+    }
+
+    format!("TUN 启动失败：{}", error)
 }
+
+/// macOS/Linux: 返回 sudoers 配置提示
+#[cfg(not(target_os = "windows"))]
+fn get_permission_error_message() -> String {
+    let tun_path = get_tun_path();
+    let tun_path_str = tun_path.to_string_lossy();
+    format!(
+        "TUN 模式需要免密 sudo 权限，当前未配置。\n\n\
+        请在终端执行以下命令配置免密（仅需一次）：\n\n\
+          sudo visudo -f /etc/sudoers.d/simpleplane\n\n\
+        在打开的编辑器中添加一行：\n\n\
+          {} ALL=(ALL) NOPASSWD: {}\n\n\
+        保存退出后重试即可。",
+        std::env::var("USER").unwrap_or_else(|_| "你的用户名".to_string()),
+        tun_path_str
+    )
+}
+
+/// Windows: 返回管理员权限运行提示
+#[cfg(target_os = "windows")]
+fn get_permission_error_message() -> String {
+    let tun_path = get_tun_path();
+    let tun_path_str = tun_path.to_string_lossy();
+    let config_dir = crate::config::get_config_dir();
+    let config_path_str = config_dir.join("tun.toml").to_string_lossy().to_string();
+    format!(
+        "TUN 模式需要管理员权限，当前权限不足。\n\n\
+        方法一：右键点击 SimplePlane 应用，选择「以管理员身份运行」\n\n\
+        方法二：在管理员 PowerShell 中执行以下命令（一次性配置计划任务，之后自动提权）：\n\n\
+          schtasks /Create /TN \"SimplePlane-TUN\" /TR \"'{}' --config '{}'\" /SC ONDEMAND /RL HIGHEST /F\n\n\
+        配置后程序会自动通过计划任务启动 TUN，无需每次手动提权。",
+        tun_path_str,
+        config_path_str
+    )
 }
