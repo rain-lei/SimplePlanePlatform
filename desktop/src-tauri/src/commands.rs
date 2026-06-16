@@ -84,9 +84,11 @@ pub async fn connect(
 pub async fn disconnect(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
     let mut s = state.lock().await;
 
-    // 1. 还原系统代理
+    // 1. 还原系统代理（失败不阻塞断开流程）
     if s.original_proxy_state.is_some() {
-        proxy::restore_system_proxy(&mut s).await?;
+        if let Err(e) = proxy::restore_system_proxy(&mut s).await {
+            log::warn!("Failed to restore system proxy (non-fatal): {}", e);
+        }
     }
 
     // 2. 停止 TUN（如果有）
