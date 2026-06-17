@@ -270,7 +270,7 @@ const App = (function () {
     localConfig.local = {
       port: intVal('#localPort', 1080),
       http_proxy_enabled: $('#httpProxyEnabled').checked,
-      http_proxy_port: intVal('#localPort', 1080) + 7,
+      http_proxy_port: intVal('#localPort', 1080), // HTTP 与 SOCKS5 共用端口
     };
 
     // 收集服务器卡片
@@ -662,6 +662,10 @@ const App = (function () {
       markChanged();
     });
 
+    // 导入服务器
+    $('#btnImportServers')?.addEventListener('click', openImportModal);
+    $('#importFileInput')?.addEventListener('change', handleImportFile);
+
     ['#proxyList', '#directList'].forEach(sel => {
       $(sel)?.addEventListener('input', () => { updateRouteCounts(); markChanged(); });
     });
@@ -698,6 +702,53 @@ const App = (function () {
   }
 
   // ============================================================
+  // Import Servers
+  // ============================================================
+  function openImportModal() {
+    $('#importModal').hidden = false;
+    $('#importYamlInput').value = '';
+  }
+
+  function closeImportModal() {
+    $('#importModal').hidden = true;
+  }
+
+  function handleImportFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      $('#importYamlInput').value = ev.target.result;
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // 重置以允许重复选择同一文件
+  }
+
+  async function doImportServers() {
+    const yamlContent = val('#importYamlInput').trim();
+    if (!yamlContent) {
+      toast('请粘贴 YAML 内容或选择文件', 'warning');
+      return;
+    }
+    try {
+      const servers = await invoke('import_servers', { yamlContent });
+      if (!servers || servers.length === 0) {
+        toast('未解析到服务器配置', 'warning');
+        return;
+      }
+      // 渲染导入的服务器卡片
+      renderServerCards(servers);
+      markChanged();
+      closeImportModal();
+      toast(`成功导入 ${servers.length} 个服务器节点`, 'success');
+      addLog('success', `导入了 ${servers.length} 个服务器节点`);
+    } catch (err) {
+      toast(`导入失败: ${err}`, 'error');
+      addLog('error', `服务器导入失败: ${err}`);
+    }
+  }
+
+  // ============================================================
   // Helpers
   // ============================================================
   function val(sel) { const el = typeof sel === 'string' ? $(sel) : sel; return el ? el.value : ''; }
@@ -719,5 +770,6 @@ const App = (function () {
     quickStartProxy, quickStartTun, quickStopAll, resetNetwork, toggleSystemProxy,
     saveTunConfig, switchLogService, clearLogs, runDiagnose,
     savePreset, applyPreset, deletePreset,
+    closeImportModal, doImportServers,
   };
 })();

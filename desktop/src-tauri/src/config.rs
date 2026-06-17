@@ -200,9 +200,12 @@ pub fn load_tun_config() -> Result<TunConfig, String> {
     let config_path = get_config_dir().join("tun.toml");
 
     if !config_path.exists() {
-        let default_config = get_default_tun_config();
-        save_tun_config(&default_config)?;
-        return Ok(default_config);
+        // 首次运行，写入带注释的默认配置
+        let commented_content = get_default_tun_config_with_comments();
+        fs::write(&config_path, &commented_content)
+            .map_err(|e| format!("Failed to write tun config: {}", e))?;
+        return toml::from_str(&commented_content)
+            .map_err(|e| format!("Failed to parse default tun config: {}", e));
     }
 
     let content =
@@ -333,6 +336,193 @@ fn get_default_tun_config() -> TunConfig {
             dns_bypass_ips: vec!["114.114.114.114".to_string(), "223.5.5.5".to_string()],
         }),
     }
+}
+
+/// 生成带中文注释的默认 TUN 配置文件内容
+fn get_default_tun_config_with_comments() -> String {
+    r#"# SimplePlane TUN 模式配置
+# TUN 模式会创建一个虚拟网卡，接管系统所有网络流量（比系统代理更彻底）
+
+[tun]
+# 虚拟网卡名称（macOS 为 utun9，Linux 为 tun0，Windows 为 wintun）
+name = "utun9"
+# TUN 网卡的虚拟 IP 地址（用于路由劫持，不要与你的局域网 IP 段冲突）
+address = "198.18.0.1"
+# 子网掩码（255.254.0.0 表示劫持 198.18.0.0/15 整个段的流量）
+netmask = "255.254.0.0"
+# 最大传输单元（MTU），一般保持 1500 即可，无需修改
+mtu = 1500
+# 是否启用 TUN 设备（设为 false 可临时禁用而不删除配置）
+enabled = true
+
+[dns]
+# 本地 DNS 监听地址（TUN 会把系统 DNS 劫持到这里进行分流）
+listen = "127.0.0.1:53"
+# 上游 DNS 服务器（实际负责域名解析的 DNS，推荐使用国外 DNS 避免污染）
+upstream = "8.8.8.8:53"
+
+[proxy]
+# TUN 抓到的流量转发到的 SOCKS5 代理地址（即 proxy-local 监听的端口）
+socks5_addr = "127.0.0.1:1080"
+
+[routing]
+# 默认路由动作：proxy = 所有流量走代理，direct = 所有流量直连
+# 配合下方 rules 使用，rules 中匹配的条目按 action 执行，其余走 default_action
+default_action = "proxy"
+
+# 路由规则列表（按顺序匹配，首条命中即停止）
+# type 支持：domain_suffix（域名后缀）、domain_keyword（域名关键词）、ip_cidr（IP 网段）
+# action 支持：direct（直连）、proxy（走代理）
+
+[[routing.rules]]
+# 美团内网直连
+type = "domain_suffix"
+value = "sankuai.com"
+action = "direct"
+
+[[routing.rules]]
+# 美团外网直连
+type = "domain_suffix"
+value = "meituan.com"
+action = "direct"
+
+[[routing.rules]]
+# 所有 .cn 域名直连
+type = "domain_suffix"
+value = "cn"
+action = "direct"
+
+[[routing.rules]]
+# 内网 10.x.x.x 直连
+type = "ip_cidr"
+value = "10.0.0.0/8"
+action = "direct"
+
+[[routing.rules]]
+# 内网 172.16-31.x.x 直连
+type = "ip_cidr"
+value = "172.16.0.0/12"
+action = "direct"
+
+[[routing.rules]]
+# 内网 192.168.x.x 直连
+type = "ip_cidr"
+value = "192.168.0.0/16"
+action = "direct"
+
+[bypass]
+# 代理远程服务器自身的 IP（必须绕过 TUN，否则流量会死循环）
+proxy_remote_ips = ["54.234.196.30"]
+# 额外需要绕过 TUN 的网段（公司内网等，确保这些 IP 不会被劫持到代理）
+extra_cidrs = ["10.0.0.0/8", "11.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+# DNS 服务器 IP（这些 IP 的 53 端口请求需要绕过，否则 DNS 查询本身也会被劫持）
+dns_bypass_ips = ["114.114.114.114", "223.5.5.5"]
+"#.to_string()
+}
+
+/// 从 YAML 字符串解析服务器列表（支持多种格式）
+/// 格式一（Java 兼容）：
+///   remoteServers:
+///     - host: 1.2.3.4
+///       port: 9090
+///       cipher: chacha20
+///       cipherKey: "key"
+/// 格式二（简化）：
+///   servers:
+///     - host: 1.2.3.4
+///       port: 9090
+///       cipher: chacha20
+///       key: "key"
+/// 格式三（单服务器）：
+///   host: 1.2.3.4
+///   port: 9090
+///   cipher: chacha20
+///   key: "key"
+pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteConfig>, String> {
+    let value: serde_yaml::Value = serde_yaml::from_str(yaml_content)
+        .map_err(|e| format!("YAML 解析失败: {}", e))?;
+
+    let mut servers = Vec::new();
+
+    // 尝试格式一：remoteServers 列表
+    if let Some(remote_servers) = value.get("remoteServers").and_then(|v| v.as_sequence()) {
+        for item in remote_servers {
+            servers.push(parse_server_entry(item)?);
+        }
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
+    // 尝试格式二：servers 列表
+    if let Some(server_list) = value.get("servers").and_then(|v| v.as_sequence()) {
+        for item in server_list {
+            servers.push(parse_server_entry(item)?);
+        }
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
+    // 尝试格式三：顶层就是单个服务器
+    if value.get("host").is_some() {
+        servers.push(parse_server_entry(&value)?);
+        return Ok(servers);
+    }
+
+    // 尝试格式四：顶层是数组
+    if let Some(arr) = value.as_sequence() {
+        for item in arr {
+            servers.push(parse_server_entry(item)?);
+        }
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
+    Err("无法识别的 YAML 格式，请确保包含 remoteServers 或 servers 字段".to_string())
+}
+
+/// 从单个 YAML 节点解析出一个 RemoteConfig
+fn parse_server_entry(value: &serde_yaml::Value) -> Result<RemoteConfig, String> {
+    let host = value
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if host.is_empty() {
+        return Err("服务器缺少 host 字段".to_string());
+    }
+
+    let port = value
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(9090) as u16;
+
+    let cipher = value
+        .get("cipher")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            // Java 格式用 cipher，也兼容 method
+            value.get("method").and_then(|v| v.as_str()).unwrap_or("chacha20")
+        })
+        .to_string();
+
+    let key = value
+        .get("key")
+        .or_else(|| value.get("cipherKey"))
+        .or_else(|| value.get("password"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(RemoteConfig {
+        host,
+        port,
+        cipher,
+        key,
+    })
 }
 
 /// 将 ProxyConfig 转为 Java 兼容的 YAML 格式字符串

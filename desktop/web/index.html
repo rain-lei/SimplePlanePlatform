@@ -192,8 +192,9 @@
           <div class="form-group">
             <h3>本地设置</h3>
             <div class="form-row">
-              <label>SOCKS5 监听端口</label>
+              <label>本地监听端口</label>
               <input type="number" id="localPort" value="1080" class="input">
+              <span class="form-hint">SOCKS5 与 HTTP 代理共用此端口（协议自动识别）</span>
             </div>
             <div class="form-row">
               <label>HTTP 代理</label>
@@ -201,6 +202,7 @@
                 <input type="checkbox" id="httpProxyEnabled" checked>
                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
               </label>
+              <span class="form-hint">开启后系统 HTTP/HTTPS 代理也指向此端口</span>
             </div>
             <div class="form-row">
               <label>集群策略</label>
@@ -233,9 +235,42 @@
           <div class="form-group">
             <div class="form-group-header">
               <h3>远端服务器</h3>
-              <button class="btn-sm btn-add" id="btnAddServer">+ 添加</button>
+              <div class="header-btn-group">
+                <button class="btn-sm btn-add" id="btnImportServers">导入 YML</button>
+                <button class="btn-sm btn-add" id="btnAddServer">+ 添加</button>
+              </div>
             </div>
             <div id="remoteServers" class="server-cards-container"></div>
+          </div>
+
+          <!-- 导入弹窗 -->
+          <div id="importModal" class="modal" hidden>
+            <div class="modal-overlay" onclick="App.closeImportModal()"></div>
+            <div class="modal-content">
+              <div class="modal-header">
+                <h3>导入服务器配置</h3>
+                <button class="btn-sm" onclick="App.closeImportModal()">×</button>
+              </div>
+              <div class="modal-body">
+                <p class="section-desc">粘贴 YAML 格式的服务器配置，或选择 .yml 文件导入。</p>
+                <textarea id="importYamlInput" class="code-editor" rows="10" spellcheck="false" placeholder="remoteServers:
+  - host: 1.2.3.4
+    port: 9090
+    cipher: chacha20
+    cipherKey: &quot;your-key&quot;
+  - host: 5.6.7.8
+    port: 8080
+    cipher: aes-gcm
+    cipherKey: &quot;another-key&quot;"></textarea>
+                <div class="modal-actions">
+                  <label class="btn-sm btn-add btn-file">
+                    选择文件
+                    <input type="file" id="importFileInput" accept=".yml,.yaml" hidden>
+                  </label>
+                  <button class="btn-save" onclick="App.doImportServers()">导入</button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
