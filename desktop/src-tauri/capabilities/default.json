@@ -10,6 +10,7 @@
     "shell:allow-spawn",
     "shell:allow-stdin-write",
     "shell:allow-kill",
-    "shell:default"
+    "shell:default",
+    "updater:default"
   ]
 }

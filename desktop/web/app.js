@@ -31,6 +31,7 @@ const App = (function () {
     await loadPresets();
     startStatusPolling();
     addLog('info', '应用已启动，等待连接...');
+    setTimeout(checkForUpdates, 3000);
   }
 
   // ============================================================
@@ -749,6 +750,106 @@ const App = (function () {
   }
 
   // ============================================================
+  // Auto Updater
+  // ============================================================
+  let isCheckingUpdate = false;
+
+  async function checkForUpdates() {
+    if (isCheckingUpdate) return;
+    isCheckingUpdate = true;
+    try {
+      const { check } = window.__TAURI__.updater;
+      const update = await check();
+      if (update) {
+        showUpdateDialog(update);
+      }
+    } catch (e) {
+      console.log('[updater] Check failed (silent):', e);
+    } finally {
+      isCheckingUpdate = false;
+    }
+  }
+
+  function showUpdateDialog(update) {
+    // 防止重复弹出
+    if ($('#updateOverlay')) return;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'updateOverlay';
+    overlay.className = 'update-overlay';
+
+    const version = esc(update.version || '未知');
+    const body = esc(update.body || '无更新说明');
+
+    overlay.innerHTML = `
+      <div class="update-dialog">
+        <div class="update-dialog-header">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <h3>发现新版本 v${version}</h3>
+        </div>
+        <div class="update-dialog-body">
+          <p class="update-notes">${body}</p>
+        </div>
+        <div class="update-dialog-progress" id="updateProgress" hidden>
+          <div class="update-progress-bar">
+            <div class="update-progress-fill" id="updateProgressFill"></div>
+          </div>
+          <span class="update-progress-text" id="updateProgressText">0%</span>
+        </div>
+        <div class="update-dialog-actions" id="updateActions">
+          <button class="btn-sm" id="btnUpdateLater">稍后提醒</button>
+          <button class="btn-save" id="btnUpdateNow">立即更新</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // 绑定按钮
+    $('#btnUpdateLater').addEventListener('click', () => {
+      overlay.remove();
+    });
+
+    $('#btnUpdateNow').addEventListener('click', async () => {
+      $('#updateActions').hidden = true;
+      $('#updateProgress').hidden = false;
+
+      try {
+        let downloaded = 0;
+        let contentLength = 0;
+
+        await update.downloadAndInstall((event) => {
+          if (event.event === 'Started') {
+            contentLength = event.data.contentLength || 0;
+            $('#updateProgressText').textContent = '开始下载...';
+          } else if (event.event === 'Progress') {
+            downloaded += event.data.chunkLength || 0;
+            const percent = contentLength > 0 ? Math.round((downloaded / contentLength) * 100) : 0;
+            $('#updateProgressFill').style.width = percent + '%';
+            $('#updateProgressText').textContent = percent + '%';
+          } else if (event.event === 'Finished') {
+            $('#updateProgressFill').style.width = '100%';
+            $('#updateProgressText').textContent = '下载完成，准备安装...';
+          }
+        });
+
+        // 安装完成后重启
+        const { relaunch } = window.__TAURI__.process;
+        await relaunch();
+      } catch (e) {
+        console.error('[updater] Download/install failed:', e);
+        $('#updateProgress').hidden = true;
+        $('#updateActions').hidden = false;
+        toast(`更新失败: ${e}`, 'error');
+      }
+    });
+  }
+
+  // ============================================================
   // Helpers
   // ============================================================
   function val(sel) { const el = typeof sel === 'string' ? $(sel) : sel; return el ? el.value : ''; }
@@ -771,5 +872,6 @@ const App = (function () {
     saveTunConfig, switchLogService, clearLogs, runDiagnose,
     savePreset, applyPreset, deletePreset,
     closeImportModal, doImportServers,
+    checkForUpdates,
   };
 })();

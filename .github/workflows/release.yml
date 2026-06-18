@@ -161,11 +161,26 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
           releaseName: 'SimplePlane ${{ github.ref_name }}'
           releaseBody: 'See the assets to download and install this version.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
+          updaterJsonPreferNsis: true
+
+      # Step 6: Verify updater endpoint (post-release sanity check)
+      - name: Verify latest.json is accessible
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          sleep 10
+          STATUS=$(curl -sL -o /dev/null -w "%{http_code}" \
+            "https://github.com/zhh293/SimplePlanePlatform/releases/latest/download/latest.json")
+          echo "latest.json HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::latest.json not yet accessible (status=$STATUS), CDN may need time to propagate"
+          fi
