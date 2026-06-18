@@ -202,6 +202,7 @@ Task 5: 端到端集成测试与发布验证
 +      # Step 6: Verify updater endpoint (post-release sanity check)
 +      - name: Verify latest.json is accessible
 +        if: startsWith(github.ref, 'refs/tags/')
++        shell: bash
 +        run: |
 +          sleep 10  # 等待 GitHub CDN 刷新
 +          STATUS=$(curl -sL -o /dev/null -w "%{http_code}" \
