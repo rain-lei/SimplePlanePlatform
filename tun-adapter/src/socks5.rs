@@ -399,4 +399,209 @@ mod tests {
         let result = proxy_tcp_stream("www.example.com", 80, server_side, addr).await;
         assert!(result.is_err());
     }
+
+    // =========================================================================
+    // TC-TUN-004 [P1]：SOCKS5 CONNECT 请求编码正确性
+    // =========================================================================
+
+    /// 验证域名类型的 CONNECT 请求编码格式符合 RFC 1928
+    #[tokio::test]
+    async fn test_tc_tun004_connect_request_domain_encoding() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 读取认证请求并回复
+            let mut auth = [0u8; 3];
+            stream.read_exact(&mut auth).await.unwrap();
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+
+            // 读取 CONNECT 请求并验证编码
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 0x05, "VER must be 0x05");
+            assert_eq!(header[1], 0x01, "CMD must be CONNECT (0x01)");
+            assert_eq!(header[2], 0x00, "RSV must be 0x00");
+            assert_eq!(header[3], 0x03, "ATYP must be DOMAIN (0x03)");
+
+            // 读取域名长度
+            let mut len_buf = [0u8; 1];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            assert_eq!(len_buf[0], 15, "domain 'www.example.com' is 15 bytes");
+
+            // 读取域名
+            let mut domain = vec![0u8; 15];
+            stream.read_exact(&mut domain).await.unwrap();
+            assert_eq!(&domain, b"www.example.com");
+
+            // 读取端口（大端）
+            let mut port_buf = [0u8; 2];
+            stream.read_exact(&mut port_buf).await.unwrap();
+            let port = u16::from_be_bytes(port_buf);
+            assert_eq!(port, 443, "port must be 443");
+
+            // 回复成功
+            stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+
+        let (_client, server_side) = duplex(4096);
+        let _ = proxy_tcp_stream("www.example.com", 443, server_side, addr).await;
+        server_task.await.unwrap();
+    }
+
+    /// 验证 IPv4 类型的 CONNECT 请求编码格式
+    #[tokio::test]
+    async fn test_tc_tun004_connect_request_ipv4_encoding() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 认证
+            let mut auth = [0u8; 3];
+            stream.read_exact(&mut auth).await.unwrap();
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+
+            // 读取 CONNECT 请求
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[3], 0x01, "ATYP must be IPv4 (0x01)");
+
+            // 读取 IPv4 地址
+            let mut ip = [0u8; 4];
+            stream.read_exact(&mut ip).await.unwrap();
+            assert_eq!(ip, [93, 184, 216, 34], "IP must be 93.184.216.34");
+
+            // 读取端口
+            let mut port_buf = [0u8; 2];
+            stream.read_exact(&mut port_buf).await.unwrap();
+            assert_eq!(u16::from_be_bytes(port_buf), 8080);
+
+            // 回复成功
+            stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+
+        let (_client, server_side) = duplex(4096);
+        let _ = proxy_tcp_stream("93.184.216.34", 8080, server_side, addr).await;
+        server_task.await.unwrap();
+    }
+
+    // =========================================================================
+    // TC-TUN-005 [P1]：SOCKS5 错误响应码正确映射
+    // =========================================================================
+
+    /// 验证 CONNECT 被拒绝时（REP != 0x00）返回 ConnectRejected 错误
+    #[tokio::test]
+    async fn test_tc_tun005_connect_rejected_host_unreachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 认证
+            let mut auth = [0u8; 3];
+            stream.read_exact(&mut auth).await.unwrap();
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+
+            // 读取 CONNECT 请求（跳过）
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf).await;
+
+            // 回复 host unreachable (0x04)
+            stream.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+
+        let (_client, server_side) = duplex(4096);
+        let result = proxy_tcp_stream("unreachable.host", 80, server_side, addr).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            Socks5Error::ConnectRejected(msg) => {
+                assert!(msg.contains("0x04"), "should contain reply code 0x04");
+                assert!(msg.contains("host unreachable"), "should contain reason text");
+            }
+            other => panic!("expected ConnectRejected, got: {:?}", other),
+        }
+    }
+
+    /// 验证认证失败（服务端选择了非 NO_AUTH 方法）返回 AuthFailed
+    #[tokio::test]
+    async fn test_tc_tun005_auth_failed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut auth = [0u8; 3];
+            stream.read_exact(&mut auth).await.unwrap();
+            // 回复需要用户名/密码认证 (0x02)
+            stream.write_all(&[0x05, 0x02]).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let result = socks5_auth_handshake(&mut stream).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Socks5Error::AuthFailed => {} // expected
+            other => panic!("expected AuthFailed, got: {:?}", other),
+        }
+    }
+
+    /// 验证服务端返回非法版本号时返回 ProtocolError
+    #[tokio::test]
+    async fn test_tc_tun005_invalid_version_in_auth_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut auth = [0u8; 3];
+            stream.read_exact(&mut auth).await.unwrap();
+            // 回复错误的版本号
+            stream.write_all(&[0x04, 0x00]).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let result = socks5_auth_handshake(&mut stream).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Socks5Error::ProtocolError(msg) => {
+                assert!(msg.contains("version"), "should mention version: {}", msg);
+            }
+            other => panic!("expected ProtocolError, got: {:?}", other),
+        }
+    }
+
+    /// 验证 CONNECT 响应中非法 ATYP 返回 ProtocolError
+    #[tokio::test]
+    async fn test_tc_tun005_unknown_atyp_in_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 认证
+            let mut auth = [0u8; 3];
+            stream.read_exact(&mut auth).await.unwrap();
+            stream.write_all(&[0x05, 0x00]).await.unwrap();
+
+            // 读取 CONNECT 请求
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf).await;
+
+            // 回复成功但使用非法 ATYP (0xFF)
+            stream.write_all(&[0x05, 0x00, 0x00, 0xFF, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+
+        let (_client, server_side) = duplex(4096);
+        let result = proxy_tcp_stream("example.com", 80, server_side, addr).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Socks5Error::ProtocolError(msg) => {
+                assert!(msg.contains("ATYP"), "should mention ATYP: {}", msg);
+            }
+            other => panic!("expected ProtocolError, got: {:?}", other),
+        }
+    }
 }
