@@ -230,8 +230,14 @@ pub async fn start_proxy_local(state: &mut AppState) -> Result<(), String> {
     cmd.current_dir(&project_root);
     log::info!("Working dir: {:?}", project_root);
 
-    cmd.arg("-Dproxy.dns.nameservers=114.114.114.114,223.5.5.5")
-        .arg("-jar")
+    // 不再传递自定义 DNS 参数：
+    // 1. 系统代理模式：DirectRelayHandler 应使用系统 DNS（JVM 默认），
+    //    自定义 DNS (114/223) 的 UDP 查询可能被网络封锁导致解析失败。
+    // 2. TUN 模式：所有流量（含 Direct）都经 SOCKS5 → proxy-remote，
+    //    由远端做 DNS 解析，本地 DirectRelayHandler 不会被调用；
+    //    即使被调用，UDP 查询也会被 TUN 截获造成回环。
+
+    cmd.arg("-jar")
         .arg(&jar_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

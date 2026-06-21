@@ -2,7 +2,7 @@
 # ============================================================
 # TUN 模式一键启动脚本
 #
-# 启动顺序：proxy-local（带 DNS bypass 参数） → tun-adapter
+# 启动顺序：proxy-local → tun-adapter
 # 停止：Ctrl+C 会同时终止两个进程并恢复系统路由/DNS
 # ============================================================
 
@@ -12,14 +12,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # === 配置 ===
-# proxy-local 直连用的 DNS 服务器（必须和 tun.toml 中 dns_bypass_ips 一致）
-# 顺序兜底：优先用稳定的 114，114 不可用时才轮到 223 。
-DNS_SERVERS="114.114.114.114"
-DNS_FALLBACK="223.5.5.5"
-
-# proxy-local 的 JVM DNS 参数
-# 使用 Netty 内置 DNS resolver（系统属性 proxy.dns.nameservers）
-JVM_DNS_OPTS="-Dproxy.dns.nameservers=${DNS_SERVERS},${DNS_FALLBACK}"
+# TUN 模式下不再需要给 proxy-local 注入自定义 DNS：
+# 所有流量（含 Direct）都经 SOCKS5 -> proxy-remote 由远端做 DNS 解析，
+# proxy-local 的 DirectRelayHandler 不会被调用。
+# dns_bypass_ips 仅影响 tun-adapter 层面的路由绕行，与 proxy-local 无关。
+JVM_DNS_OPTS=""
 
 # ============================================================
 
@@ -35,7 +32,6 @@ if [ -f "$DNS_BACKUP" ]; then
     echo ""
 fi
 
-echo "DNS bypass servers: ${DNS_SERVERS}, ${DNS_FALLBACK}"
 echo ""
 
 # 清理函数：Ctrl+C 时同时杀掉两个子进程
@@ -80,7 +76,7 @@ if [ ! -f "$PROXY_JAR" ]; then
     echo "     Building proxy-local fat jar..."
     mvn -pl proxy-local -am package -DskipTests -q
 fi
-echo "[1/2] Starting proxy-local with DNS bypass..."
+echo "[1/2] Starting proxy-local..."
 java ${JVM_DNS_OPTS} -jar "$PROXY_JAR" &
 PROXY_PID=$!
 
