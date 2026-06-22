@@ -127,7 +127,7 @@ function startProxyLocal() {
   const jar = getJarPath();
   if (!jar) return { ok: false, error: 'JAR not found. Click Build first.' };
 
-  const args = ['-Dproxy.dns.nameservers=114.114.114.114,223.5.5.5', '-jar', jar];
+  const args = ['-jar', jar];
   const proc = spawn('java', args, { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], detached: false });
 
   processes['proxy-local'].proc = proc;
@@ -628,18 +628,10 @@ function stopTunAdapter() {
   broadcastSSE('status', getStatusAll());
   addLog('tun-adapter', '[dashboard] Stopped.');
 
-  // Root-cause fix for the "114 DNS drags down direct connections" issue:
-  // proxy-local is always launched with -Dproxy.dns.nameservers=114.114.114.114,...
-  // and is independent of TUN. Stopping TUN while proxy-local lingers leaves that
-  // 114 resolver in play. Tear it down together so direct connections aren't
-  // affected once the user turns the proxy off. (Independent of the Drop timing,
-  // so do it immediately.)
-  if (processes['proxy-local'] && processes['proxy-local'].status !== 'stopped') {
-    addLog('tun-adapter', '[dashboard] Stopping proxy-local together (avoids stale 114 DNS)...');
-    try { stopProxyLocal(); } catch (e) {
-      addLog('tun-adapter', `[dashboard] stopProxyLocal failed: ${e.message}`, 'stderr');
-    }
-  }
+  // 不再需要随 TUN 停止而强制关闭 proxy-local：
+  // 之前 proxy-local 总是带 -Dproxy.dns.nameservers 启动，TUN 停止后
+  // 残留的 114 DNS resolver 会拖垮直连。现已移除该参数，
+  // proxy-local 使用系统默认 DNS，可以独立于 TUN 继续运行。
 
   // Safety net for DNS: the tun-adapter Drop handler normally restores DNS within
   // a few hundred ms of SIGTERM and deletes the backup file. We must check AFTER

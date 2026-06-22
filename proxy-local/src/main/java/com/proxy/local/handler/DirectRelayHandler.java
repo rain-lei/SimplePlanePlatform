@@ -50,8 +50,13 @@ public class DirectRelayHandler extends ChannelInboundHandlerAdapter {
     /**
      * 可选的自定义 DNS resolver，通过系统属性 proxy.dns.nameservers 配置。
      * <p>
-     * TUN 模式下系统 DNS 被 FakeDNS 劫持，需要指定真实 DNS 服务器进行解析。
-     * 系统代理模式下不设置此属性，使用系统默认 DNS，完全兼容原有逻辑。
+     * 正常情况下不设置此属性（CUSTOM_RESOLVER 为 null），使用 JVM/系统默认 DNS。
+     * <ul>
+     *   <li>系统代理模式：DirectRelayHandler 直接用系统 DNS 解析目标域名。</li>
+     *   <li>TUN 模式：所有流量（含 Direct）由 tun-adapter 通过 SOCKS5 → proxy-remote
+     *       转发，远端做 DNS 解析，DirectRelayHandler 不会被调用。</li>
+     * </ul>
+     * 仅在特殊调试场景下可通过 -Dproxy.dns.nameservers=ip1,ip2 手动启用。
      * </p>
      */
     private static final AddressResolverGroup<?> CUSTOM_RESOLVER = initResolver();
@@ -78,7 +83,7 @@ public class DirectRelayHandler extends ChannelInboundHandlerAdapter {
     private static AddressResolverGroup<?> initResolver() {
         String dnsServers = System.getProperty("proxy.dns.nameservers");
         if (dnsServers == null || dnsServers.trim().isEmpty()) {
-            return null;
+            return null;  // 使用 JVM/系统默认 DNS
         }
         List<InetSocketAddress> dnsAddrs = new ArrayList<>();
         for (String s : dnsServers.split(",")) {

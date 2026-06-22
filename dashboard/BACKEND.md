@@ -89,14 +89,14 @@ function addLog(name, line, stream = 'stdout') {
   1. 若已有存活 proc → 返回 `Already running`；若 proc 句柄是僵尸则清理。
   2. `getJarPath()` 找 fat jar，没有则提示先 Build。
   3. `killProcessOnPort(1080)` 先清掉占用 1080 的残留进程。
-  4. `spawn('java', ['-Dproxy.dns.nameservers=114.114.114.114,223.5.5.5', '-jar', jar])`。
+  4. `spawn('java', ['-jar', jar])`.
   5. 监听 stdout/stderr，命中 `started on port` 等关键字即置 `running`。
   6. 5s 后兜底：若仍 `starting` 且 1080 在监听则置 `running`。
 - **停止 `stopProxyLocal()`**（第 174 行）：
   - 无受管 proc 但 1080 有人 → `killProcessOnPort(1080)` 清孤儿。
   - 有 proc → macOS `SIGTERM`、Windows `taskkill /F /T`；3s 后仍在则强杀 + 清端口。
 
-> 关键设计：proxy-local 始终带 `-Dproxy.dns.nameservers=114...` 启动，**与 TUN 独立**。这也是「停 TUN 时要连带停 proxy-local」的根因（见 3.4）。
+> 关键设计：proxy-local 不注入任何自定义 DNS 参数，始终使用系统默认 DNS。系统代理模式下 `DirectRelayHandler` 通过系统 DNS 解析直连域名；TUN 模式下所有流量（含 Direct）由远端做 DNS 解析，`DirectRelayHandler` 不会被调用。
 >
 > 端口复用（已修复的冲突）：`startProxyLocal` 在启动前先用 `isPortListening(1080)` 检测，若 1080 已在监听（例如先开了系统代理、或外部 start-tun.sh 起过）则**复用现有监听、跳过启动**（返回 `{ ok:true, reused:true }`），不再无脑 `killProcessOnPort(1080)` 重启，避免瞬断正在服务的连接。
 
@@ -119,10 +119,9 @@ tun-adapter 需要 **root 权限**创建虚拟网卡、改路由和 DNS，跨平
   2. 再按 PID 文件杀；macOS 下 root 进程 `SIGTERM` 遇 EPERM → `sudo -n kill`。
   3. 给 **5 秒** 让 tun-adapter 的 Rust `Drop` 处理器完成「删 resolver → 还原 DNS → 删路由 → 还原网关 → flush 缓存」，5s 后仍在才 `SIGKILL` / `sudo -n kill -9`。
   4. 兜底按进程名 `pkill -f tun-adapter`（含 `sudo -n` 版本）。
-  5. **连带停 proxy-local**：避免 114 DNS 残留拖慢直连（见下方说明）。
-  6. **DNS 兜底**：5.5s 后调 `restoreDnsFallback()`（见第 4 节）。
+  5. **DNS 兜底**：5.5s 后调 `restoreDnsFallback()`（见第 4 节）。
 
-> 为什么停 TUN 要连带停 proxy-local：proxy-local 永远带 `-Dproxy.dns.nameservers=114...` 启动。若只停 TUN 而 proxy-local 还活着，114 resolver 会继续生效，导致用户关代理后直连变慢。所以 `stopTunAdapter` 里检测到 proxy-local 非 stopped 就一起停。
+> proxy-local 不再注入自定义 DNS 参数，因此停 TUN 时不需要连带停 proxy-local。proxy-local 使用系统默认 DNS，可以独立于 TUN 继续运行。
 
 ### 3.5 状态聚合 `getStatusAll()`
 
