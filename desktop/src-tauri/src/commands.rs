@@ -421,7 +421,7 @@ fn get_builtin_presets() -> Vec<Preset> {
         },
         Preset {
             name: "全局代理".to_string(),
-            description: "所有流量通过代理。适合需要全局翻墙的场景。".to_string(),
+            description: "所有流量通过代理。适合需要全局代理访问的场景。".to_string(),
             config: config::ProxyConfig {
                 local: config::LocalConfig {
                     port: 1080,
