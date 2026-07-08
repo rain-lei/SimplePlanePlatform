@@ -10,14 +10,22 @@
         android:id="@+id/nativeVersionText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="24dp"
+        android:layout_marginBottom="12dp"
         android:textSize="16sp"
         android:text="native 版本: -" />
+
+    <TextView
+        android:id="@+id/vpnStatusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="24dp"
+        android:text="@string/vpn_status_idle"
+        android:textSize="18sp" />
 
     <Button
         android:id="@+id/toggleVpnButton"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/toggle_vpn" />
+        android:text="@string/connect_vpn" />
 
 </LinearLayout>

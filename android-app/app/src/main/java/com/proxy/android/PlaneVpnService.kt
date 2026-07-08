@@ -16,14 +16,11 @@ import org.json.JSONObject
 /**
  * 系统 VPN 服务。
  *
- * 进度：
- *
- * - A1：最小骨架——声明清单、被系统拉起并进入前台，但**不建立 TUN、不启动数据面**。
- * - A2：持有 [NativeBridge]，对接 Rust → Kotlin 的 `protect` / `onStatus` 回调。
+ * 职责：
+ * - 作为前台 [VpnService] 建立 TUN 接口并把 fd 移交给 plane-core。
+ * - 持有 [NativeBridge]，对接 Rust → Kotlin 的 `protect` / `onStatus` 回调。
  *   `protect(fd)` 复用 [VpnService] 自带方法，把出站 socket 排除出 TUN（防回环 0.3-1）。
- *
- * 真正的 `establish()` + `nativeStart(fd, configJson)` 仍在 Task A3/A6 接入；A2 不在
- * `onStartCommand` 里启动数据面，以免破坏 A1 已通过的生命周期验收。
+ * - 通过应用内状态广播把连接/断开/异常状态同步给 [MainActivity]。
  */
 class PlaneVpnService : VpnService() {
 
@@ -36,6 +33,9 @@ class PlaneVpnService : VpnService() {
     /** 当前会话 handle（0 = 未启动）。由 `nativeStart` 赋值。 */
     private var nativeHandle: Long = 0L
 
+    /** 是否已经进入前台；用于避免 stopForeground 在未前台化时被调用。 */
+    private var foregroundStarted: Boolean = false
+
     /**
      * 当前 TUN 接口（仅用于在未成功 detachFd 前的兜底关闭）。
      *
@@ -46,21 +46,31 @@ class PlaneVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            Log.i(TAG, "收到停止 VPN 指令")
+            stopSelfSafely()
+            return START_NOT_STICKY
+        }
+
         ensureNotificationChannel()
-        startForegroundCompat()
+        startForegroundCompat(getString(R.string.vpn_status_connecting))
+        publishStatus(running = true, message = getString(R.string.vpn_status_connecting))
 
         // 已在运行则不重复启动（避免重复 establish/ nativeStart）。
         if (nativeHandle != 0L) {
             Log.i(TAG, "数据面已在运行，忽略重复 onStartCommand")
+            publishStatus(running = true, message = getString(R.string.vpn_status_connected))
             return START_STICKY
         }
 
         if (!startDataPlane(intent)) {
             // 启动失败：退出前台并停止自身，保证不残留半启动状态。
             Log.e(TAG, "数据面启动失败，停止服务")
+            publishStatus(running = false, message = getString(R.string.vpn_status_error))
             stopSelfSafely()
             return START_NOT_STICKY
         }
+        publishStatus(running = true, message = getString(R.string.vpn_status_connected))
         return START_STICKY
     }
 
@@ -80,10 +90,16 @@ class PlaneVpnService : VpnService() {
         tunInterface = pfd
 
         val configJson = buildConfigJson(intent)
+        val nativeBridge = runCatching { bridge }
+            .onFailure { Log.e(TAG, "NativeBridge 初始化失败", it) }
+            .getOrElse {
+                closeTunBeforeDetach()
+                return false
+            }
         val fd = pfd.detachFd() // 所有权移交 native；detach 后 pfd 不再持有 fd。
         tunInterface = null // 已移交，置空避免误 close。
 
-        val handle = runCatching { bridge.nativeStart(fd, configJson) }
+        val handle = runCatching { nativeBridge.nativeStart(fd, configJson) }
             .onFailure { Log.e(TAG, "nativeStart 抛出异常", it) }
             .getOrDefault(0L)
 
@@ -97,6 +113,19 @@ class PlaneVpnService : VpnService() {
         nativeHandle = handle
         Log.i(TAG, "数据面已启动，handle=$handle")
         return true
+    }
+
+    /**
+     * native 尚未接管 fd 前的失败路径清理。
+     *
+     * 一旦调用 `detachFd()`，fd 所有权就不再属于 [ParcelFileDescriptor]，Kotlin 侧也
+     * 不能安全关闭；所以所有可能在 detach 前失败的初始化都必须先走这里兜底关闭。
+     */
+    private fun closeTunBeforeDetach() {
+        tunInterface?.let {
+            runCatching { it.close() }.onFailure { e -> Log.w(TAG, "关闭未移交 TUN 失败", e) }
+        }
+        tunInterface = null
     }
 
     /**
@@ -160,10 +189,16 @@ class PlaneVpnService : VpnService() {
     /**
      * 接收来自 Rust（经 [NativeBridge.onStatus]）的状态上报。
      *
-     * A2 阶段仅记录日志；B5/B7 会据此刷新通知与 UI 状态。
+     * 当前先同步到 Activity；后续 B7 可在这里扩展流量统计与更细的健康状态。
      */
     fun onNativeStatus(state: String) {
         Log.i(TAG, "native status: $state")
+        val message = when (state) {
+            "connected" -> getString(R.string.vpn_status_connected)
+            "error" -> getString(R.string.vpn_status_error)
+            else -> state
+        }
+        publishStatus(running = isRunning, message = message)
     }
 
     /**
@@ -175,11 +210,16 @@ class PlaneVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopSelfSafely()
+        cleanupDataPlane()
         super.onDestroy()
     }
 
     private fun stopSelfSafely() {
+        cleanupDataPlane()
+        stopSelf()
+    }
+
+    private fun cleanupDataPlane() {
         // 1) 回收 native 会话：nativeStop 内部 send(shutdown) 让栈/调度器优雅退出，
         //    并在 Drop 时 close(TUN fd)。handle 为 0 时为 no-op。
         if (nativeHandle != 0L) {
@@ -189,31 +229,25 @@ class PlaneVpnService : VpnService() {
         }
         // 2) 兜底：仅当 establish 成功但尚未 detach 给 native（nativeStart 之前失败）时，
         //    此处关闭未移交的接口，避免 fd 泄漏。正常路径 tunInterface 已为 null。
-        tunInterface?.let {
-            runCatching { it.close() }.onFailure { e -> Log.w(TAG, "关闭未移交 TUN 失败", e) }
-        }
-        tunInterface = null
+        closeTunBeforeDetach()
         stopForegroundRemoveCompat()
-        stopSelf()
+        publishStatus(running = false, message = getString(R.string.vpn_status_idle))
     }
 
     /** 退出前台并移除通知，兼容 API < 33（`stopForeground(int)` 重载 API 33+）。 */
     private fun stopForegroundRemoveCompat() {
+        if (!foregroundStarted) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+        foregroundStarted = false
     }
 
-    private fun startForegroundCompat() {
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.vpn_status_idle))
-            .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setOngoing(true)
-            .build()
+    private fun startForegroundCompat(statusText: String) {
+        val notification = buildNotification(statusText)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // targetSdk 34：前台服务必须指定类型，VPN 使用 specialUse。
@@ -225,6 +259,37 @@ class PlaneVpnService : VpnService() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        foregroundStarted = true
+    }
+
+    private fun buildNotification(statusText: String): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(statusText)
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setOngoing(true)
+            .build()
+
+    private fun updateForegroundNotification(statusText: String) {
+        if (!foregroundStarted) return
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(NOTIFICATION_ID, buildNotification(statusText))
+    }
+
+    /**
+     * 向同应用内 Activity 广播当前 VPN 状态。
+     *
+     * 使用 `setPackage(packageName)` 限定广播只发给本应用，避免把连接状态泄露给其它应用。
+     * Activity 只负责展示，不直接推断 Service 生命周期。
+     */
+    private fun publishStatus(running: Boolean, message: String) {
+        isRunning = running
+        updateForegroundNotification(message)
+        val intent = Intent(ACTION_STATUS_CHANGED)
+            .setPackage(packageName)
+            .putExtra(EXTRA_RUNNING, running)
+            .putExtra(EXTRA_STATUS_MESSAGE, message)
+        sendBroadcast(intent)
     }
 
     private fun ensureNotificationChannel() {
@@ -246,6 +311,20 @@ class PlaneVpnService : VpnService() {
         private const val TAG = "PlaneVpnService"
         private const val CHANNEL_ID = "plane_vpn_status"
         private const val NOTIFICATION_ID = 1001
+
+        /** 启动 / 停止 Service 的显式 action，避免 Activity 与 Service 约定隐式行为。 */
+        const val ACTION_START = "com.proxy.android.action.START_VPN"
+        const val ACTION_STOP = "com.proxy.android.action.STOP_VPN"
+
+        /** Service → Activity 状态广播 action 与 extra。 */
+        const val ACTION_STATUS_CHANGED = "com.proxy.android.action.VPN_STATUS_CHANGED"
+        const val EXTRA_RUNNING = "extra_running"
+        const val EXTRA_STATUS_MESSAGE = "extra_status_message"
+
+        /** 当前进程内的 VPN 运行态，供 Activity 首次进入时同步按钮状态。 */
+        @Volatile
+        var isRunning: Boolean = false
+            private set
 
         /** TUN MTU，与 native AndroidConfig 默认一致。 */
         private const val TUN_MTU = 1500
