@@ -98,7 +98,7 @@ function addLog(name, line, stream = 'stdout') {
 
 > 关键设计：proxy-local 不注入任何自定义 DNS 参数，始终使用系统默认 DNS。系统代理模式下 `DirectRelayHandler` 通过系统 DNS 解析直连域名；TUN 模式下所有流量（含 Direct）由远端做 DNS 解析，`DirectRelayHandler` 不会被调用。
 >
-> 端口复用（已修复的冲突）：`startProxyLocal` 在启动前先用 `isPortListening(1080)` 检测，若 1080 已在监听（例如先开了系统代理、或外部 start-tun.sh 起过）则**复用现有监听、跳过启动**（返回 `{ ok:true, reused:true }`），不再无脑 `killProcessOnPort(1080)` 重启，避免瞬断正在服务的连接。
+> 端口复用（已修复的冲突）：`startProxyLocal` 在启动前先用 `isPortListening(1080)` 检测，若 1080 已在监听（例如先开了系统代理、或外部 start-tun.sh 起过）则**复用现有监听、跳过启动**（返回 `{ ok:true, reused:true }`），不再直接调用 `killProcessOnPort(1080)` 重启，避免瞬断正在服务的连接。
 
 ### 3.4 tun-adapter 生命周期（最复杂）
 
