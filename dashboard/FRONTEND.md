@@ -243,7 +243,7 @@ function switchSection(name) {
 | `quickStartTun()` | 启动 proxy-local → 等 3s → 启动 tun-adapter（若弹授权对话框则等 8s） |
 | `quickStopAll()` | 关系统代理 → 停 tun-adapter → 停 proxy-local |
 
-> 端口冲突已修复：后端 `startProxyLocal` 现在检测到 1080 已在监听就复用、跳过启动（不再无脑杀进程重启），因此「先开系统代理、再一键 TUN」不会再瞬断 proxy-local。
+> 端口冲突已修复：后端 `startProxyLocal` 现在检测到 1080 已在监听就复用、跳过启动（不再直接杀进程重启），因此「先开系统代理、再一键 TUN」不会再瞬断 proxy-local。
 
 ### 7.3 TUN 权限失败的前端提示
 
