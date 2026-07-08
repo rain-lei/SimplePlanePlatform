@@ -10,4 +10,21 @@
     <string name="vpn_status_disconnecting">正在断开...</string>
     <string name="vpn_status_error">连接异常</string>
     <string name="notification_channel_name">VPN 状态</string>
+    <string name="settings_title">连接设置</string>
+    <string name="remote_host_label">远端地址</string>
+    <string name="remote_host_hint">例如 54.234.196.30 或 example.com</string>
+    <string name="remote_port_label">远端端口</string>
+    <string name="remote_port_hint">例如 9090</string>
+    <string name="remote_key_label">加密密钥</string>
+    <string name="remote_key_hint">与 proxy-remote 的 cipherKey 保持一致</string>
+    <string name="cipher_label">加密方式</string>
+    <string name="default_cipher">chacha20</string>
+    <string name="tls_label">启用 TLS</string>
+    <string name="tls_hint">当前 Android 数据面仅支持 h2c 明文 HTTP/2；TLS 接入后这里会开放。</string>
+    <string name="save_config">保存配置</string>
+    <string name="config_saved">配置已保存</string>
+    <string name="config_error_host">请填写远端地址</string>
+    <string name="config_error_port">端口需在 1-65535 之间</string>
+    <string name="config_error_key">请填写加密密钥</string>
+    <string name="config_error_tls_unsupported">当前 Android 出站暂不支持 TLS，请先关闭 TLS</string>
 </resources>
