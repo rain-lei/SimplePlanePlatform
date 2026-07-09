@@ -8,7 +8,8 @@ authors = ["zhanghonghao"]
 # Android 通过 JNI 加载本 crate，必须产出动态库（libplane_core.so）。
 [lib]
 name = "plane_core"
-crate-type = ["cdylib"]
+# Android loads the cdylib through JNI; rlib keeps host-side CI tests linkable.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # JNI 桥接（A2 起使用，A1 仅用于 nativeVersion 占位导出）

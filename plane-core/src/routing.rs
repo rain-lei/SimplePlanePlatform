@@ -315,7 +315,13 @@ mod tests {
             }],
         })
         .unwrap();
-        assert_eq!(router.route(&info(None, [10, 1, 2, 3], 80)), RouteAction::Direct);
-        assert_eq!(router.route(&info(None, [8, 8, 8, 8], 53)), RouteAction::Proxy);
+        assert_eq!(
+            router.route(&info(None, [10, 1, 2, 3], 80)),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            router.route(&info(None, [8, 8, 8, 8], 53)),
+            RouteAction::Proxy
+        );
     }
 }

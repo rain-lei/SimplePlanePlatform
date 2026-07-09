@@ -206,10 +206,7 @@ where
     }))
 }
 
-async fn establish_outbound<P>(
-    node: &RemoteNodeConfig,
-    protector: &P,
-) -> Result<OutboundConnection>
+async fn establish_outbound<P>(node: &RemoteNodeConfig, protector: &P) -> Result<OutboundConnection>
 where
     P: SocketProtector,
 {
@@ -300,16 +297,18 @@ where
     Ok(tcp)
 }
 
-async fn connect_tls(tcp: TcpStream, host: &str) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+async fn connect_tls(
+    tcp: TcpStream,
+    host: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let mut tls_config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
         .with_no_client_auth();
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
 
-    let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| {
-        CoreError::InvalidArgument(format!("invalid TLS server name {host}: {e}"))
-    })?;
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| CoreError::InvalidArgument(format!("invalid TLS server name {host}: {e}")))?;
     let connector = TlsConnector::from(Arc::new(tls_config));
     connector
         .connect(server_name, tcp)

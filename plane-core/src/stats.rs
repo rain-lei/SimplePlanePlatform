@@ -27,8 +27,7 @@ impl CoreStats {
     }
 
     pub fn add_upload(&self, bytes: usize) {
-        self.upload_bytes
-            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.upload_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     pub fn add_download(&self, bytes: usize) {
