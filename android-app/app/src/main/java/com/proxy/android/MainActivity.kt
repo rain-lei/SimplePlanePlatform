@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.VpnService
 import android.os.Bundle
+import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -63,6 +65,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
         setContentView(R.layout.activity_main)
 
         val versionView = findViewById<TextView>(R.id.nativeVersionText)
@@ -81,6 +84,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { onToggleClicked() }
         }
         bindConfigToForm(VpnConfigStore.load(this))
+        findViewById<View>(R.id.mainContent).requestFocus()
         updateVpnUi(PlaneVpnService.isRunning)
     }
 

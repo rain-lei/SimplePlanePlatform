@@ -2,11 +2,16 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/app_background"
     android:fillViewport="true">
 
     <LinearLayout
+        android:id="@+id/mainContent"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:descendantFocusability="beforeDescendants"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
         android:gravity="center_horizontal"
         android:orientation="vertical"
         android:padding="24dp">
@@ -17,6 +22,7 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="12dp"
             android:text="native 版本: -"
+            android:textColor="@color/app_text_secondary"
             android:textSize="16sp" />
 
         <TextView
@@ -25,6 +31,7 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="18dp"
             android:text="@string/vpn_status_idle"
+            android:textColor="@color/app_text_primary"
             android:textSize="18sp"
             android:textStyle="bold" />
 
@@ -32,6 +39,8 @@
             android:id="@+id/toggleVpnButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:backgroundTint="@color/app_primary"
+            android:textColor="@android:color/white"
             android:text="@string/connect_vpn" />
 
         <TextView
@@ -40,6 +49,7 @@
             android:layout_marginTop="28dp"
             android:layout_marginBottom="12dp"
             android:text="@string/settings_title"
+            android:textColor="@color/app_text_primary"
             android:textSize="18sp"
             android:textStyle="bold" />
 
@@ -47,6 +57,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:labelFor="@id/remoteHostInput"
+            android:textColor="@color/app_text_primary"
             android:text="@string/remote_host_label" />
 
         <EditText
@@ -56,12 +67,15 @@
             android:layout_marginBottom="12dp"
             android:hint="@string/remote_host_hint"
             android:inputType="textUri"
+            android:textColor="@color/app_text_primary"
+            android:textColorHint="@color/app_text_secondary"
             android:singleLine="true" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:labelFor="@id/remotePortInput"
+            android:textColor="@color/app_text_primary"
             android:text="@string/remote_port_label" />
 
         <EditText
@@ -72,12 +86,15 @@
             android:hint="@string/remote_port_hint"
             android:inputType="number"
             android:maxLength="5"
+            android:textColor="@color/app_text_primary"
+            android:textColorHint="@color/app_text_secondary"
             android:singleLine="true" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:labelFor="@id/remoteKeyInput"
+            android:textColor="@color/app_text_primary"
             android:text="@string/remote_key_label" />
 
         <EditText
@@ -88,12 +105,15 @@
             android:hint="@string/remote_key_hint"
             android:importantForAutofill="no"
             android:inputType="textPassword"
+            android:textColor="@color/app_text_primary"
+            android:textColorHint="@color/app_text_secondary"
             android:singleLine="true" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:labelFor="@id/cipherInput"
+            android:textColor="@color/app_text_primary"
             android:text="@string/cipher_label" />
 
         <EditText
@@ -104,6 +124,7 @@
             android:enabled="false"
             android:inputType="text"
             android:singleLine="true"
+            android:textColor="@color/app_text_secondary"
             android:text="@string/default_cipher" />
 
         <CheckBox
@@ -111,6 +132,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
+            android:textColor="@color/app_text_primary"
             android:text="@string/tls_label" />
 
         <TextView
@@ -118,12 +140,15 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="18dp"
             android:text="@string/tls_hint"
+            android:textColor="@color/app_text_secondary"
             android:textSize="12sp" />
 
         <Button
             android:id="@+id/saveConfigButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:backgroundTint="@color/app_primary"
+            android:textColor="@android:color/white"
             android:text="@string/save_config" />
 
     </LinearLayout>
