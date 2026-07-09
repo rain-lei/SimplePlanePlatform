@@ -46,6 +46,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::crypto::Cipher;
 use crate::error::{CoreError, Result};
 use crate::proxy_proto::{self, MessageType, ProxyMessage};
+use crate::stats::CoreStats;
 
 /// HTTP/2 单条 stream 初始流控窗口（字节），对齐 Java `initialWindowSize(1024*1024)`。
 pub const H2_STREAM_WINDOW: u32 = 1024 * 1024;
@@ -392,9 +393,21 @@ impl OutboundStream {
 ///
 /// 这里给出可独立编译/测试的最小骨架；与真实 TUN/TCP 栈的接线在 A6 完善。
 pub async fn proxy_via_remote<L>(
+    stream: OutboundStream,
+    local: L,
+    read_buf_size: usize,
+) -> Result<()>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+{
+    proxy_via_remote_counted(stream, local, read_buf_size, None).await
+}
+
+pub async fn proxy_via_remote_counted<L>(
     mut stream: OutboundStream,
     mut local: L,
     read_buf_size: usize,
+    stats: Option<Arc<CoreStats>>,
 ) -> Result<()>
 where
     L: AsyncRead + AsyncWrite + Unpin,
@@ -411,6 +424,9 @@ where
                     stream.send_disconnect()?;
                     break;
                 }
+                if let Some(stats) = &stats {
+                    stats.add_upload(n);
+                }
                 stream.send_payload(&buf[..n])?;
             }
             // 远端 → 本地
@@ -420,6 +436,9 @@ where
                         for m in msgs {
                             match m.type_ {
                                 MessageType::Data => {
+                                    if let Some(stats) = &stats {
+                                        stats.add_download(m.data.len());
+                                    }
                                     local.write_all(&m.data).await.map_err(CoreError::Io)?;
                                 }
                                 MessageType::Disconnect => return Ok(()),
