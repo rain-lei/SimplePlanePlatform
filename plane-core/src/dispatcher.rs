@@ -210,7 +210,7 @@ async fn establish_outbound<P>(node: &RemoteNodeConfig, protector: &P) -> Result
 where
     P: SocketProtector,
 {
-    if node.cipher.to_ascii_lowercase() != "chacha20" {
+    if !node.cipher.eq_ignore_ascii_case("chacha20") {
         return Err(CoreError::InvalidArgument(format!(
             "unsupported cipher for Android data plane: {}",
             node.cipher
