@@ -281,7 +281,7 @@ where
 {
     use std::os::unix::io::AsRawFd;
 
-    let addr = resolve_server_addr(host, port)?;
+    let addr = resolve_server_addr_with_protector(host, port, protector)?;
     let socket = TcpSocket::new_v4()
         .map_err(|e| CoreError::Io(std::io::Error::other(format!("create socket failed: {e}"))))?;
     let fd = socket.as_raw_fd();
@@ -377,6 +377,19 @@ fn resolve_server_addr(host: &str, port: u16) -> Result<SocketAddr> {
         })?
         .find(|addr| addr.is_ipv4())
         .ok_or_else(|| CoreError::Internal(format!("no IPv4 address for {host}:{port}")))
+}
+
+fn resolve_server_addr_with_protector<P>(host: &str, port: u16, protector: &P) -> Result<SocketAddr>
+where
+    P: SocketProtector,
+{
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return Ok(SocketAddr::from((ip, port)));
+    }
+    if let Some(ip) = protector.resolve_ipv4(host) {
+        return Ok(SocketAddr::from((ip, port)));
+    }
+    resolve_server_addr(host, port)
 }
 
 #[cfg(test)]

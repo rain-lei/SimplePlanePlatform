@@ -37,6 +37,7 @@
 //!   仅当 url 带 `cipher=chacha20`（且 `cipherKey=...`）时才与本模块的 ChaCha20-Poly1305
 //!   二进制兼容。联调时 proxy-remote 必须显式配 ChaCha20。
 
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -62,6 +63,12 @@ pub const H2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 pub trait SocketProtector: Send + Sync {
     /// 保护给定 fd 的 socket，使其流量绕过 VPN 隧道。返回 `false` 表示保护失败。
     fn protect(&self, fd: i32) -> bool;
+
+    /// Resolve through a network outside the VPN when the platform can provide
+    /// one. Returning None lets callers fall back to the normal system resolver.
+    fn resolve_ipv4(&self, _host: &str) -> Option<Ipv4Addr> {
+        None
+    }
 }
 
 /// 一个永远成功的 no-op 保护器（仅用于单测/本机直连场景）。

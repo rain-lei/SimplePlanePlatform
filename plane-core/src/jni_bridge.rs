@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::net::Ipv4Addr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
@@ -49,6 +50,26 @@ impl CallbackCtx {
         )?;
         Ok(())
     }
+
+    pub fn resolve_ipv4(&self, host: &str) -> Result<Option<Ipv4Addr>> {
+        let mut env = self.vm.attach_current_thread()?;
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            CoreError::Internal("JNI callback context already disposed".to_string())
+        })?;
+        let jhost = env.new_string(host)?;
+        let ret = env.call_method(
+            bridge.as_obj(),
+            "resolveIpv4",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&jhost)],
+        )?;
+        let obj = ret.l()?;
+        if obj.is_null() {
+            return Ok(None);
+        }
+        let ip: String = env.get_string(&JString::from(obj))?.into();
+        Ok(ip.parse::<Ipv4Addr>().ok())
+    }
 }
 
 impl Drop for CallbackCtx {
@@ -77,6 +98,16 @@ impl SocketProtector for JniProtector {
             Err(e) => {
                 tracing::warn!(fd, error = %e, "JNI protect callback failed");
                 false
+            }
+        }
+    }
+
+    fn resolve_ipv4(&self, host: &str) -> Option<Ipv4Addr> {
+        match self.cb.resolve_ipv4(host) {
+            Ok(ip) => ip,
+            Err(e) => {
+                tracing::warn!(host, error = %e, "JNI resolve callback failed");
+                None
             }
         }
     }

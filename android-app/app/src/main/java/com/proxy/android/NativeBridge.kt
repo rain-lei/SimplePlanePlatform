@@ -1,6 +1,10 @@
 package com.proxy.android
 
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
+import java.net.Inet4Address
+import java.net.InetAddress
 
 /**
  * Kotlin ↔ Rust（plane-core）的 JNI 桥接层。
@@ -72,6 +76,28 @@ class NativeBridge(private val vpn: PlaneVpnService? = null) {
         return runCatching { service.protect(fd) }
             .onFailure { Log.e(TAG, "protect($fd) 抛出异常", it) }
             .getOrDefault(false)
+    }
+
+    fun resolveIpv4(host: String): String? {
+        val service = vpn ?: return null
+        return runCatching {
+            val cm = service.getSystemService(ConnectivityManager::class.java)
+                ?: return@runCatching null
+            cm.allNetworks
+                .asSequence()
+                .filter { network ->
+                    val caps = cm.getNetworkCapabilities(network)
+                    caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
+                        !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                }
+                .flatMap { network ->
+                    runCatching { network.getAllByName(host).asSequence() }
+                        .getOrElse { emptySequence<InetAddress>() }
+                }
+                .filterIsInstance<Inet4Address>()
+                .mapNotNull { it.hostAddress }
+                .firstOrNull()
+        }.onFailure { Log.w(TAG, "resolveIpv4($host) failed", it) }.getOrNull()
     }
 
     /**
