@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
@@ -21,26 +22,47 @@ const NOTIFY_CHANNEL_CAP: usize = 1024;
 
 pub struct CallbackCtx {
     vm: JavaVM,
-    bridge: GlobalRef,
+    bridge: Option<GlobalRef>,
 }
 
 impl CallbackCtx {
     pub fn protect(&self, fd: i32) -> Result<bool> {
         let mut env = self.vm.attach_current_thread()?;
-        let ret = env.call_method(self.bridge.as_obj(), "protect", "(I)Z", &[JValue::Int(fd)])?;
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            CoreError::Internal("JNI callback context already disposed".to_string())
+        })?;
+        let ret = env.call_method(bridge.as_obj(), "protect", "(I)Z", &[JValue::Int(fd)])?;
         Ok(ret.z()?)
     }
 
     pub fn on_status(&self, state: &str) -> Result<()> {
         let mut env = self.vm.attach_current_thread()?;
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            CoreError::Internal("JNI callback context already disposed".to_string())
+        })?;
         let jstr = env.new_string(state)?;
         env.call_method(
-            self.bridge.as_obj(),
+            bridge.as_obj(),
             "onStatus",
             "(Ljava/lang/String;)V",
             &[JValue::Object(&jstr)],
         )?;
         Ok(())
+    }
+}
+
+impl Drop for CallbackCtx {
+    fn drop(&mut self) {
+        let Some(bridge) = self.bridge.take() else {
+            return;
+        };
+        match self.vm.attach_current_thread() {
+            Ok(_guard) => drop(bridge),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to attach before dropping JNI callback");
+                drop(bridge);
+            }
+        }
     }
 }
 
@@ -87,8 +109,11 @@ where
             tracing::error!(error = %e, "nativeStart failed");
             0
         }
-        Err(_) => {
-            tracing::error!("nativeStart isolated a panic");
+        Err(payload) => {
+            tracing::error!(
+                panic = %panic_payload_to_string(payload.as_ref()),
+                "nativeStart isolated a panic"
+            );
             0
         }
     }
@@ -101,7 +126,20 @@ where
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::error!(error = %e, "JNI call failed"),
-        Err(_) => tracing::error!("JNI call isolated a panic"),
+        Err(payload) => tracing::error!(
+            panic = %panic_payload_to_string(payload.as_ref()),
+            "JNI call isolated a panic"
+        ),
+    }
+}
+
+fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
@@ -136,7 +174,10 @@ fn native_start_impl(
         .enable_all()
         .build()?;
     let (shutdown, _rx) = tokio::sync::watch::channel(false);
-    let cb = Arc::new(CallbackCtx { vm, bridge });
+    let cb = Arc::new(CallbackCtx {
+        vm,
+        bridge: Some(bridge),
+    });
     let stats = Arc::new(CoreStats::new());
 
     let handle = Box::new(CoreHandle {
@@ -147,7 +188,13 @@ fn native_start_impl(
         stats: Arc::clone(&stats),
     });
 
-    spawn_data_plane(&handle, &cb, tun_fd, &config)?;
+    {
+        // AndroidTun wraps the raw fd in tokio::io::unix::AsyncFd, which must be
+        // created while a Tokio reactor is active. nativeStart runs on a Java
+        // thread, so enter the freshly-created runtime before wiring the data plane.
+        let _runtime_guard = handle.rt.enter();
+        spawn_data_plane(&handle, &cb, tun_fd, &config)?;
+    }
     stats.set_state("connected");
     let _ = cb.on_status("connected");
 
@@ -291,7 +338,9 @@ pub extern "C" fn Java_com_proxy_android_NativeBridge_nativeStats(
         }
     })) {
         Ok(json) => json,
-        Err(_) => r#"{"running":false,"state":"error","last_error":"nativeStats panic"}"#.to_string(),
+        Err(_) => {
+            r#"{"running":false,"state":"error","last_error":"nativeStats panic"}"#.to_string()
+        }
     };
 
     match env.new_string(json) {
