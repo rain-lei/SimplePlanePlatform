@@ -39,7 +39,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -224,7 +224,7 @@ impl InboundReassembler {
 }
 
 /// 单调递增的 requestId 生成器（对齐 Java 侧用全局自增 id 标识一次代理请求）。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RequestIdGen {
     next: AtomicI64,
 }
@@ -241,6 +241,57 @@ impl RequestIdGen {
     pub fn next_id(&self) -> i64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+impl Default for RequestIdGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const STREAM_SEQUENCE_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+/// Generates IDs with the same 16-bit client / 48-bit sequence layout as the
+/// Java `StreamIdFactory`, keeping concurrent clients from sharing sessions.
+#[derive(Debug)]
+pub struct StreamIdGen {
+    client_id: u16,
+    next: AtomicI64,
+}
+
+impl StreamIdGen {
+    pub fn new() -> Self {
+        let mut client_id = (rand::random::<u32>() & 0xFFFF) as u16;
+        if client_id == 0 {
+            client_id = 1;
+        }
+        Self::with_client_id(client_id)
+    }
+
+    fn with_client_id(client_id: u16) -> Self {
+        assert_ne!(client_id, 0, "stream client ID must be non-zero");
+        Self {
+            client_id,
+            next: AtomicI64::new(0),
+        }
+    }
+
+    pub fn next_id(&self) -> i64 {
+        let sequence =
+            (self.next.fetch_add(1, Ordering::Relaxed) as u64 + 1) & STREAM_SEQUENCE_MASK;
+        (((self.client_id as u64) << 48) | sequence) as i64
+    }
+}
+
+impl Default for StreamIdGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn next_stream_id() -> i64 {
+    static STREAM_IDS: OnceLock<StreamIdGen> = OnceLock::new();
+    STREAM_IDS.get_or_init(StreamIdGen::new).next_id()
 }
 
 /// 出站连接 —— 一条到 proxy-remote 的 HTTP/2 连接，承载多路 stream。
@@ -315,7 +366,8 @@ impl OutboundConnection {
 
         // 首个 CONNECT 消息（加密 DATA 帧）。
         let request_id = self.req_id_gen.next_id();
-        let connect_msg = ProxyMessage::connect(request_id, host, port);
+        let stream_id = next_stream_id();
+        let connect_msg = ProxyMessage::connect(request_id, stream_id, host, port);
         let frame = encode_encrypted_frame(&self.cipher, &connect_msg)?;
         send_stream
             .send_data(Bytes::from(frame), false)
@@ -329,6 +381,7 @@ impl OutboundConnection {
 
         Ok(OutboundStream {
             request_id,
+            stream_id,
             cipher: self.cipher.clone(),
             send_stream,
             recv_stream,
@@ -348,6 +401,7 @@ impl OutboundConnection {
 /// 接收：h2 DATA 帧 → 解密 → 切包 → DATA `ProxyMessage` → 取出业务负载。
 pub struct OutboundStream {
     request_id: i64,
+    stream_id: i64,
     cipher: Cipher,
     send_stream: h2::SendStream<Bytes>,
     recv_stream: h2::RecvStream,
@@ -360,9 +414,13 @@ impl OutboundStream {
         self.request_id
     }
 
+    pub fn stream_id(&self) -> i64 {
+        self.stream_id
+    }
+
     /// 发送一段业务数据（包成 DATA 类型 ProxyMessage，加密为一个 h2 DATA 帧）。
     pub fn send_payload(&mut self, payload: &[u8]) -> Result<()> {
-        let msg = ProxyMessage::data(self.request_id, payload);
+        let msg = ProxyMessage::data(self.stream_id, payload);
         let frame = encode_encrypted_frame(&self.cipher, &msg)?;
         self.send_stream
             .send_data(Bytes::from(frame), false)
@@ -372,7 +430,7 @@ impl OutboundStream {
 
     /// 发送 DISCONNECT 并以 end_stream 关闭发送侧。
     pub fn send_disconnect(&mut self) -> Result<()> {
-        let msg = ProxyMessage::disconnect(self.request_id);
+        let msg = ProxyMessage::disconnect(self.request_id, self.stream_id);
         let frame = encode_encrypted_frame(&self.cipher, &msg)?;
         self.send_stream
             .send_data(Bytes::from(frame), true)
@@ -507,9 +565,21 @@ mod tests {
     }
 
     #[test]
+    fn stream_id_gen_matches_java_layout() {
+        let g = StreamIdGen::with_client_id(0x1234);
+        let first = g.next_id() as u64;
+        let second = g.next_id() as u64;
+
+        assert_eq!(first >> 48, 0x1234);
+        assert_eq!(first & STREAM_SEQUENCE_MASK, 1);
+        assert_eq!(second & STREAM_SEQUENCE_MASK, 2);
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn encode_encrypted_frame_is_decryptable() {
         let cipher = test_cipher();
-        let msg = ProxyMessage::connect(42, "example.com", 443);
+        let msg = ProxyMessage::connect(42, 9001, "example.com", 443);
         let frame = encode_encrypted_frame(&cipher, &msg).unwrap();
         // 加密帧 = 4字节长度前缀 + nonce(12) + ct + tag(16)，长度 = 明文 + 4 + 28。
         let plaintext = msg.encode();
@@ -554,8 +624,8 @@ mod tests {
         // 同一加密块内含多条 ProxyMessage（明文拼接后整体加密）。
         let cipher = test_cipher();
         let m1 = ProxyMessage::data(1, b"first");
-        let m2 = ProxyMessage::connect(1, "a.com", 80);
-        let m3 = ProxyMessage::disconnect(1);
+        let m2 = ProxyMessage::connect(1, 101, "a.com", 80);
+        let m3 = ProxyMessage::disconnect(2, 101);
         let mut plaintext = Vec::new();
         plaintext.extend_from_slice(&m1.encode());
         plaintext.extend_from_slice(&m2.encode());
