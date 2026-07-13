@@ -388,12 +388,35 @@ where
     if let Some(ip) = protector.resolve_ipv4(host) {
         return Ok(SocketAddr::from((ip, port)));
     }
+    if !protector.allow_unprotected_dns_fallback() {
+        return Err(CoreError::Internal(format!(
+            "protected DNS resolution failed for {host}:{port}"
+        )));
+    }
     resolve_server_addr(host, port)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ProtectedDnsOnly {
+        resolved: Option<Ipv4Addr>,
+    }
+
+    impl SocketProtector for ProtectedDnsOnly {
+        fn protect(&self, _fd: i32) -> bool {
+            true
+        }
+
+        fn resolve_ipv4(&self, _host: &str) -> Option<Ipv4Addr> {
+            self.resolved
+        }
+
+        fn allow_unprotected_dns_fallback(&self) -> bool {
+            false
+        }
+    }
 
     #[test]
     fn resolve_ip_literal() {
@@ -406,5 +429,22 @@ mod tests {
         let addr = resolve_server_addr("localhost", 80);
         assert!(addr.is_ok());
         assert_eq!(addr.unwrap().port(), 80);
+    }
+
+    #[test]
+    fn protected_resolver_address_is_used() {
+        let protector = ProtectedDnsOnly {
+            resolved: Some(Ipv4Addr::new(203, 0, 113, 7)),
+        };
+        let addr = resolve_server_addr_with_protector("example.test", 443, &protector).unwrap();
+        assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], 443)));
+    }
+
+    #[test]
+    fn protected_resolver_does_not_fall_back_into_vpn_dns() {
+        let protector = ProtectedDnsOnly { resolved: None };
+        let err = resolve_server_addr_with_protector("example.invalid", 443, &protector)
+            .expect_err("protected DNS failure must be terminal");
+        assert!(err.to_string().contains("protected DNS resolution failed"));
     }
 }

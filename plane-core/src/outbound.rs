@@ -69,6 +69,13 @@ pub trait SocketProtector: Send + Sync {
     fn resolve_ipv4(&self, _host: &str) -> Option<Ipv4Addr> {
         None
     }
+
+    /// Whether callers may use the process-wide resolver when protected DNS
+    /// returns no address. Android must return false because its system resolver
+    /// is routed into the VPN and can recursively re-enter the TUN interface.
+    fn allow_unprotected_dns_fallback(&self) -> bool {
+        true
+    }
 }
 
 /// 一个永远成功的 no-op 保护器（仅用于单测/本机直连场景）。

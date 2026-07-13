@@ -6,6 +6,9 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -13,6 +16,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.net.Inet4Address
 
 class PlaneVpnService : VpnService() {
     private val bridge: NativeBridge by lazy { NativeBridge(this) }
@@ -107,6 +111,9 @@ class PlaneVpnService : VpnService() {
             Builder()
                 .setSession(getString(R.string.app_name))
                 .setMtu(TUN_MTU)
+                // The data plane runs in this process. Excluding our own UID is
+                // the last line of defense if a per-socket protect call regresses.
+                .addDisallowedApplication(packageName)
                 .addAddress(TUN_ADDRESS, TUN_PREFIX)
                 .addRoute("0.0.0.0", 0)
                 .addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
@@ -114,6 +121,68 @@ class PlaneVpnService : VpnService() {
                 .addDnsServer(FAKE_DNS_SERVER)
                 .establish()
         }.onFailure { Log.e(TAG, "establish threw", it) }.getOrNull()
+
+    /**
+     * Excludes an outbound native socket from this VPN and pins it to the
+     * currently usable physical network. Both direct and proxy connections
+     * call this before connect, so neither can re-enter the TUN interface.
+     */
+    fun protectOutboundSocket(fd: Int): Boolean {
+        if (!protect(fd)) {
+            Log.e(TAG, "VpnService.protect($fd) returned false")
+            AppLogStore.add("出站 socket 保护失败: fd=$fd")
+            return false
+        }
+
+        val network = findUnderlyingNetwork()
+        if (network == null) {
+            Log.e(TAG, "no non-VPN network available for fd=$fd")
+            AppLogStore.add("没有可用的底层网络")
+            return false
+        }
+
+        return runCatching {
+            // fromFd duplicates the descriptor. Binding the duplicate changes
+            // the underlying socket while closing it leaves Rust's fd alive.
+            ParcelFileDescriptor.fromFd(fd).use { duplicate ->
+                network.bindSocket(duplicate.fileDescriptor)
+            }
+            Log.d(TAG, "protected fd=$fd on network=$network")
+            true
+        }.onFailure {
+            Log.e(TAG, "bind fd=$fd to network=$network failed", it)
+            AppLogStore.add("出站 socket 绑定底层网络失败: ${it.message}")
+        }.getOrDefault(false)
+    }
+
+    /** Resolves through one physical network, never through the VPN DNS path. */
+    fun resolveIpv4OutsideVpn(host: String): String? {
+        val network = findUnderlyingNetwork() ?: run {
+            Log.w(TAG, "resolveIpv4OutsideVpn($host): no non-VPN network")
+            return null
+        }
+        return runCatching {
+            network.getAllByName(host)
+                .filterIsInstance<Inet4Address>()
+                .firstOrNull()
+                ?.hostAddress
+        }.onFailure {
+            Log.w(TAG, "resolveIpv4OutsideVpn($host) on $network failed", it)
+        }.getOrNull()
+    }
+
+    private fun findUnderlyingNetwork(): Network? {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return null
+
+        fun isUsable(network: Network): Boolean {
+            val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
+            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+
+        return connectivity.activeNetwork?.takeIf(::isUsable)
+    }
 
     private fun buildConfigJson(intent: Intent?): String {
         val explicit = intent?.getStringExtra(EXTRA_CONFIG_JSON)?.takeIf { it.isNotBlank() }

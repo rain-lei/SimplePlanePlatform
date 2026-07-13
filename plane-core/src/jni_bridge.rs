@@ -111,6 +111,10 @@ impl SocketProtector for JniProtector {
             }
         }
     }
+
+    fn allow_unprotected_dns_fallback(&self) -> bool {
+        false
+    }
 }
 
 pub struct CoreHandle {
