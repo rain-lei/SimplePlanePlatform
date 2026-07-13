@@ -46,6 +46,8 @@ pub struct RemoteNode {
 pub struct RoutingConfig {
     #[serde(default = "default_route_action", alias = "defaultAction")]
     pub default_action: String,
+    #[serde(default = "default_cn_direct", alias = "cnDirect")]
+    pub cn_direct: bool,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
 }
@@ -88,6 +90,10 @@ fn default_route_action() -> String {
     "proxy".to_string()
 }
 
+fn default_cn_direct() -> bool {
+    true
+}
+
 impl Default for AndroidConfig {
     fn default() -> Self {
         Self {
@@ -108,6 +114,7 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             default_action: default_route_action(),
+            cn_direct: default_cn_direct(),
             rules: Vec::new(),
         }
     }
@@ -170,7 +177,15 @@ impl AndroidConfig {
     }
 
     pub fn normalized_routing(&self) -> RoutingConfig {
-        if !self.routing.rules.is_empty() {
+        let routing_is_custom = self.routing.default_action != default_route_action()
+            || !self.routing.cn_direct
+            || !self.routing.rules.is_empty();
+        let legacy_route_is_custom = self.route.default_route != default_route_action()
+            || !self.route.direct_list.is_empty()
+            || !self.route.proxy_list.is_empty();
+
+        // New Android configs use `routing`; only untouched defaults may fall back to `route`.
+        if routing_is_custom || !legacy_route_is_custom {
             return self.routing.clone();
         }
 
@@ -196,6 +211,7 @@ impl AndroidConfig {
 
         RoutingConfig {
             default_action: self.route.default_route.clone(),
+            cn_direct: true,
             rules,
         }
     }
@@ -209,7 +225,17 @@ mod tests {
     fn empty_json_uses_defaults() {
         let c = AndroidConfig::from_json("").unwrap();
         assert_eq!(c.mtu, 1500);
+        assert!(c.routing.cn_direct);
         assert!(!c.outbound_ready());
+    }
+
+    #[test]
+    fn smart_cn_routing_can_be_disabled_explicitly() {
+        let c = AndroidConfig::from_json(
+            r#"{"routing":{"default_action":"proxy","cn_direct":false,"rules":[]}}"#,
+        )
+        .unwrap();
+        assert!(!c.normalized_routing().cn_direct);
     }
 
     #[test]

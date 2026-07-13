@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var nodesContainer: LinearLayout
     private lateinit var addNodeButton: Button
     private lateinit var defaultRouteSpinner: Spinner
+    private lateinit var cnDirectCheckBox: CheckBox
     private lateinit var directListInput: EditText
     private lateinit var proxyListInput: EditText
     private lateinit var advancedRulesInput: EditText
@@ -100,6 +101,7 @@ class MainActivity : AppCompatActivity() {
         }
         defaultRouteSpinner = findViewById(R.id.defaultRouteSpinner)
         defaultRouteSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, routeActions)
+        cnDirectCheckBox = findViewById(R.id.cnDirectCheckBox)
         directListInput = findViewById(R.id.directListInput)
         proxyListInput = findViewById(R.id.proxyListInput)
         advancedRulesInput = findViewById(R.id.advancedRulesInput)
@@ -183,6 +185,7 @@ class MainActivity : AppCompatActivity() {
         if (nodeRows.isEmpty()) addNodeRow(AndroidVpnConfig.defaultConfig().remotes.first())
 
         defaultRouteSpinner.setSelection(routeActions.indexOf(config.routing.defaultAction).coerceAtLeast(0))
+        cnDirectCheckBox.isChecked = config.routing.cnDirect
         directListInput.setText(
             config.routing.rules
                 .filter { it.type == "domain_pattern" && it.action == "direct" }
@@ -265,6 +268,7 @@ class MainActivity : AppCompatActivity() {
             remotes = remotes,
             routing = AndroidRoutingConfig(
                 defaultAction = routeActions[defaultRouteSpinner.selectedItemPosition],
+                cnDirect = cnDirectCheckBox.isChecked,
                 rules = rules,
             ),
         )
@@ -371,6 +375,7 @@ class MainActivity : AppCompatActivity() {
             addNodeButton,
             saveConfigButton,
             defaultRouteSpinner,
+            cnDirectCheckBox,
             directListInput,
             proxyListInput,
             advancedRulesInput,

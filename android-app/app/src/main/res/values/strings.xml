@@ -45,4 +45,5 @@
     <string name="config_error_host">请填写远端地址</string>
     <string name="config_error_port">端口需在 1-65535 之间</string>
     <string name="config_error_key">请填写加密密钥</string>
+    <string name="cn_direct_label">国内流量智能直连</string>
 </resources>

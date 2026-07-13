@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 
@@ -34,8 +34,98 @@ trait Rule: Send + Sync {
 
 pub struct Router {
     rules: Vec<Box<dyn Rule>>,
+    cn_direct: bool,
     default_action: RouteAction,
 }
+
+const CN_IPV4_RANGES: &[u8] = include_bytes!("../data/cn_ipv4_ranges.bin");
+
+const CN_DOMAIN_SUFFIXES: &[&str] = &[
+    "126.com",
+    "163.com",
+    "360.cn",
+    "58.com",
+    "aaplimg.com",
+    "alibaba.com",
+    "alicdn.com",
+    "alipay.com",
+    "aliyun.com",
+    "aliyuncs.com",
+    "amap.com",
+    "apple.com",
+    "autonavi.com",
+    "autonavidata.com",
+    "baidu.com",
+    "bdstatic.com",
+    "bcebos.com",
+    "bilibili.com",
+    "bilivideo.com",
+    "bosszhipin.com",
+    "bytedance.com",
+    "byteimg.com",
+    "cdn-apple.com",
+    "chaoxing.com",
+    "coding.net",
+    "csdn.net",
+    "ctrip.com",
+    "dianping.com",
+    "didi.cn",
+    "dingtalk.com",
+    "douyin.com",
+    "ele.me",
+    "feishu.cn",
+    "gitee.com",
+    "gtimg.cn",
+    "hdslb.com",
+    "heytap.com",
+    "hicloud.com",
+    "honor.com",
+    "huawei.com",
+    "icloud.com",
+    "idqqimg.com",
+    "jd.com",
+    "jdcloud.com",
+    "jianshu.com",
+    "kingsoft.com",
+    "ks-cdn.com",
+    "ksyun.com",
+    "kuaishou.com",
+    "meituan.com",
+    "meituan.net",
+    "mi.com",
+    "micloud.xiaomi.net",
+    "miui.com",
+    "myqcloud.com",
+    "neixin.cn",
+    "oppo.com",
+    "pinduoduo.com",
+    "pstatp.com",
+    "qpic.cn",
+    "qq.com",
+    "qunar.com",
+    "sankuai.com",
+    "sankuai.info",
+    "sina.com",
+    "sina.com.cn",
+    "sinaimg.cn",
+    "snssdk.com",
+    "so.com",
+    "sogou.com",
+    "taobao.com",
+    "tencent.com",
+    "tmall.com",
+    "toutiao.com",
+    "vivo.com",
+    "vocabgo.com",
+    "wechat.com",
+    "weibo.com",
+    "xiaohongshu.com",
+    "xiaomi.com",
+    "xiaomi.net",
+    "xhscdn.com",
+    "zhihu.com",
+    "zhipin.com",
+];
 
 struct DomainPatternRule {
     pattern: String,
@@ -213,6 +303,7 @@ impl Router {
         );
         Ok(Self {
             rules,
+            cn_direct: config.cn_direct,
             default_action,
         })
     }
@@ -231,8 +322,83 @@ impl Router {
                 return action;
             }
         }
+        if self.cn_direct && matches_cn_route(info) {
+            tracing::debug!(
+                "route smart-cn dst={:?}:{} domain={:?} -> Direct",
+                info.dst_ip,
+                info.dst_port,
+                info.domain
+            );
+            return RouteAction::Direct;
+        }
         self.default_action.clone()
     }
+}
+
+fn matches_cn_route(info: &ConnectionInfo) -> bool {
+    if info.domain.as_deref().is_some_and(is_cn_domain) {
+        return true;
+    }
+
+    match info.dst_ip {
+        IpAddr::V4(ip) => is_local_ipv4(ip) || is_cn_ipv4(ip),
+        IpAddr::V6(_) => false,
+    }
+}
+
+fn is_cn_domain(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if domain == "cn" || domain.ends_with(".cn") {
+        return true;
+    }
+    CN_DOMAIN_SUFFIXES
+        .iter()
+        .any(|suffix| domain_matches_suffix(&domain, suffix))
+}
+
+fn domain_matches_suffix(domain: &str, suffix: &str) -> bool {
+    domain == suffix
+        || domain
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn is_local_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+}
+
+fn is_cn_ipv4(ip: Ipv4Addr) -> bool {
+    debug_assert_eq!(CN_IPV4_RANGES.len() % 8, 0);
+    let needle = u32::from(ip);
+    let mut low = 0usize;
+    let mut high = CN_IPV4_RANGES.len() / 8;
+
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let offset = mid * 8;
+        let start = u32::from_be_bytes(
+            CN_IPV4_RANGES[offset..offset + 4]
+                .try_into()
+                .expect("CN IPv4 start record"),
+        );
+        let end = u32::from_be_bytes(
+            CN_IPV4_RANGES[offset + 4..offset + 8]
+                .try_into()
+                .expect("CN IPv4 end record"),
+        );
+        if needle < start {
+            high = mid;
+        } else if needle > end {
+            low = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalize_domain_value(value: &str) -> String {
@@ -284,6 +450,7 @@ mod tests {
     fn direct_rule_has_priority_by_order() {
         let router = Router::from_config(&RoutingConfig {
             default_action: "proxy".to_string(),
+            cn_direct: false,
             rules: vec![
                 RuleConfig {
                     rule_type: "domain_pattern".to_string(),
@@ -308,6 +475,7 @@ mod tests {
     fn cidr_rule_matches_without_domain() {
         let router = Router::from_config(&RoutingConfig {
             default_action: "proxy".to_string(),
+            cn_direct: false,
             rules: vec![RuleConfig {
                 rule_type: "ip_cidr".to_string(),
                 value: "10.0.0.0/8".to_string(),
@@ -323,5 +491,67 @@ mod tests {
             router.route(&info(None, [8, 8, 8, 8], 53)),
             RouteAction::Proxy
         );
+    }
+
+    #[test]
+    fn smart_cn_direct_uses_domain_then_geoip() {
+        let router = Router::from_config(&RoutingConfig {
+            default_action: "proxy".to_string(),
+            cn_direct: true,
+            rules: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(
+            router.route(&info(Some("api.xiaomi.com"), [198, 18, 0, 2], 443)),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            router.route(&info(None, [120, 233, 23, 125], 80)),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            router.route(&info(Some("www.google.com"), [198, 18, 0, 3], 443)),
+            RouteAction::Proxy
+        );
+        assert_eq!(
+            router.route(&info(None, [8, 8, 8, 8], 443)),
+            RouteAction::Proxy
+        );
+    }
+
+    #[test]
+    fn explicit_user_rule_overrides_smart_cn_direct() {
+        let router = Router::from_config(&RoutingConfig {
+            default_action: "proxy".to_string(),
+            cn_direct: true,
+            rules: vec![RuleConfig {
+                rule_type: "domain_suffix".to_string(),
+                value: "xiaomi.com".to_string(),
+                action: "proxy".to_string(),
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(
+            router.route(&info(Some("api.xiaomi.com"), [198, 18, 0, 2], 443)),
+            RouteAction::Proxy
+        );
+    }
+
+    #[test]
+    fn cn_ipv4_data_is_sorted_and_well_formed() {
+        assert!(!CN_IPV4_RANGES.is_empty());
+        assert_eq!(CN_IPV4_RANGES.len() % 8, 0);
+        let mut previous_end = None;
+        for record in CN_IPV4_RANGES.chunks_exact(8) {
+            let start = u32::from_be_bytes(record[0..4].try_into().unwrap());
+            let end = u32::from_be_bytes(record[4..8].try_into().unwrap());
+            assert!(start <= end);
+            if let Some(previous) = previous_end {
+                assert!(previous < start);
+            }
+            previous_end = Some(end);
+        }
     }
 }

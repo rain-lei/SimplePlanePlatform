@@ -25,6 +25,7 @@ data class RouteRuleConfig(
 
 data class AndroidRoutingConfig(
     val defaultAction: String = "proxy",
+    val cnDirect: Boolean = true,
     val rules: List<RouteRuleConfig> = emptyList(),
 )
 
@@ -72,6 +73,7 @@ data class AndroidVpnConfig(
             })
             .put("routing", JSONObject()
                 .put("default_action", routing.defaultAction)
+                .put("cn_direct", routing.cnDirect)
                 .put("rules", JSONArray().apply {
                     routing.rules.forEach { rule ->
                         put(JSONObject()
@@ -195,6 +197,7 @@ data class AndroidVpnConfig(
                 val rulesArray = routing.optJSONArray("rules") ?: JSONArray()
                 return AndroidRoutingConfig(
                     defaultAction = routing.optString("default_action", routing.optString("defaultAction", "proxy")),
+                    cnDirect = routing.optBoolean("cn_direct", routing.optBoolean("cnDirect", true)),
                     rules = parseRulesArray(rulesArray),
                 )
             }
@@ -207,6 +210,7 @@ data class AndroidVpnConfig(
             addPatternRules(proxy, "proxy", rules)
             return AndroidRoutingConfig(
                 defaultAction = route.optString("defaultRoute", route.optString("default_route", "proxy")),
+                cnDirect = true,
                 rules = rules,
             )
         }
@@ -290,7 +294,11 @@ data class AndroidVpnConfig(
 
             return AndroidVpnConfig(
                 remotes = remotes.ifEmpty { defaultConfig().remotes },
-                routing = AndroidRoutingConfig(defaultRoute, rules),
+                routing = AndroidRoutingConfig(
+                    defaultAction = defaultRoute,
+                    cnDirect = true,
+                    rules = rules,
+                ),
             )
         }
 
