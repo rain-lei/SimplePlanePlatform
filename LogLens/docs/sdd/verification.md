@@ -430,3 +430,11 @@ T16–T24 的 Proxy Remote 融合验收已完成。边界仍为：没有用真�
 ## LogLens 迁移后构建回归（2026-10-18）
 
 项目已迁移到 `E:\SimplePlanePlatform\LogLens`。使用 `scripts/build.ps1` 在迁移路径以 JBR 21 和 Corretto 17 分别执行 `-pl loglens-agent -am test`，两次均通过 12 个模块共 87 项测试，失败/错误/跳过为 0。随后在新路径执行 `scripts/package-release.ps1`，BUILD SUCCESS，`scripts/verify-release.py` 通过；产物 Agent 24,205,811 bytes、Viewer 17,120,642 bytes、API 31,104 bytes。构建缓存、临时目录与产物留在该子目录 `.build/`、`dist/`（均忽略，不纳入源码提交）。
+
+## Proxy Remote 实际 systemd 部署与本地面板验收（2026-10-18）
+
+将分支提交 `8f3939c47deadfec81ed55e1b5bc4444f29b19bb` 构建出的 Agent 部署到实际 `proxy-remote.service`。服务运行于 Amazon Corretto 17.0.20；通过 systemd service drop-in 设置 `JAVA_TOOL_OPTIONS` 注入 Agent 和监控 YAML，遥测数据写入服务账户的数据目录。Web 服务绑定服务器 loopback `127.0.0.1:9527`，没有增加公网监听。
+
+部署后 systemd 服务为 active，面板监听进程 PID 与服务 MainPID 一致，排除了其他进程占用面板端口的情况。健康 API 返回 `accepting=true`、`outputHealthy=true`、`telemetryDropped=0`。在运维工作站建立 `127.0.0.1:9527 -> server loopback 127.0.0.1:9527` SSH 隧道后，浏览器页面返回 HTTP 200、标题为“LogLens / 日志工作台”；本地 health 和活动连接 API 均成功。该时点活动连接数为 16，随线上流量变化，不是固定验收值。Agent SHA-256 和脱敏部署摘要见 [proxyremote-deployment.json](evidence/proxyremote-deployment.json)。
+
+该检查证明实际 Proxy Remote 服务中的 Agent 已启动、面板由正确 JVM 提供且隧道可用。检查过程没有读取 peer 地址或 payload，也没有通过生产请求验证每个会话的字节值；生产 Logback 日志捕获和字节累计分别由前述专项测试覆盖。现有服务重启会短暂中断代理连接，后续配置变更需按 [部署指南](../proxy-remote-monitoring.md) 维护。基础 LogLens R01–R24 的既有审计缺口和 G2–G7 门禁仍开放。

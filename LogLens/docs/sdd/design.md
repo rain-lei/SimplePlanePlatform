@@ -95,7 +95,7 @@ LogLens 仍以单个 premain Agent 启动。Logback 采集器与 Proxy Remote �
 
 ### Byte Buddy 切点
 
-在 AgentRuntime 中安装独立、可 reset 的 ProxyRemoteTransformer，与 LogbackTransformer 同生命周期、同一 Instrumentation。通过精确类名和方法签名匹配：`com.proxy.remote.outbound.SessionManager.register/remove` 建立及结束逻辑会话；`OutboundSession.forward(byte[])` 和 `writeBack(byte[])` 只读取数组长度并更新方向计数；CONNECT 处理路径采集目标和出站建连结果；服务端 Netty 入站 channel active/inactive 切点采集远端地址、transport 和物理连接生命周期。实现前用 proxy-remote 源码及真实集成测试锁定 transport 具体切点，不能只凭类名 matcher 推断适配成功。
+在 AgentRuntime 中安装独立、可 reset 的 ProxyRemoteTransformer，与 LogbackTransformer 同生命周期、同一 Instrumentation。当前 matcher 按精确类名和签名增强：SessionManager.register 的双参数入口登记逻辑会话；OutboundSession.setOutboundChannel 记录会话激活，close 记录关闭；forward(byte[]) 与 writeBack(byte[]) 仅读取数组长度并累计两个方向的字节。目标 host/port、session key 和 stream id 从注册会话的公开访问器快照，不额外织入 CONNECT 处理器。物理连接由 NettyServer$ 与 Http3Server$ 的 initChannel 切点观察；适配器据 channel 结构筛选物理 HTTP/2 channel 或 QUIC channel，并从 closeFuture 观察断开。实际 matcher 以 ProxyRemoteTransformer.java 和对应集成证据为准。
 
 Advice 只向 bootstrap CaptureBridge 发送 JDK-only 的不可变 DTO（字符串、数字、枚举名）；不得把 Channel、Invocation、ProxyMessage、byte[] 或应用类对象传给后台线程。所有 advice 捕获异常并隔离，不得改变原方法返回值、异常或控制流。应用在 Java 8 上运行时 transformer 明确报告不兼容并禁用监控；目标矩阵为 Java 17/21。
 
@@ -103,7 +103,7 @@ Advice 只向 bootstrap CaptureBridge 发送 JDK-only 的不可变 DTO（字符�
 
 新增 `TelemetryEvent` 和 `TelemetryKind`，类型至少包括 CLIENT_CONNECTED、CLIENT_DISCONNECTED、SESSION_OPENED、SESSION_CONNECT_FAILED、SESSION_CLOSED、TRAFFIC_SAMPLE。事件含 captureSequence、wall/monotonic time、connectionId、streamId、peerAddress、transport、target、status/closeReason、uplinkBytes/downlinkBytes。缺失字段使用 null/明确状态，不伪造。
 
-活动连接与会话登记于有界 `TelemetryRegistry`。每个会话使用原子计数器累计 `forward` 上行和 `writeBack` 下行长度；采样调度器按配置间隔生成累计值或增量值（设计固定为累计值，以便前端恢复快照）。关闭会话立即生成最终事件并移除活动条目。重复关闭幂等。达容量时拒绝新增跟踪并递增 drop 诊断计数，不阻塞业务线程。AgentAdvice 只调用非阻塞 tryPublish；遥测队列容量与既有 ring buffer 共用，遥测满载时 telemetryDropped 递增，日志 overflow 配置语义不变。
+活动连接与会话登记于有界 `ProxyRemoteMonitor`。每个会话使用 LongAdder 累计 `forward` 上行和 `writeBack` 下行长度；采样调度器按配置间隔生成累计值，以便前端恢复快照。会话关闭时立即生成最终事件并移除活动条目；重复关闭幂等。达到容量时拒绝新增跟踪并递增 drop 计数，不阻塞业务线程。Advice 只通过 bootstrap bridge 发布 JDK-only 数据，遥测与日志共用既有有界 ring buffer；遥测满载时 telemetryDropped 递增，日志 overflow 配置语义不变。
 
 CaptureBridge 增加 JDK-only TelemetryCallback 注册点；Runtime callback 负责 DTO 校验、统一 sequence 分配和 tryPublish。Disruptor Envelope 扩展 TELEMETRY 类型；消费时日志走 captured→processor chain，TelemetryEvent 走 telemetry storage→统一 EventHub。消费 finally 清空两个类型引用。shutdown 顺序先禁用所有 bridge 回调、撤销 transformers，再停止 ticker/telemetry sampler，之后排空队列并关闭存储。
 
@@ -111,7 +111,7 @@ CaptureBridge 增加 JDK-only TelemetryCallback 注册点；Runtime callback 负
 
 事实文件新增轮转 `telemetry-NNNN.jsonl`，SQLite 新增 telemetry_events 表及时间、connectionId、streamId、peerAddress、target、transport、kind 索引；元数据和保留清理同时管理新 segment。append JSONL→SQLite transaction→EventHub 的一致性顺序遵循现有日志存储。活动连接快照从 registry 获取并与历史事件分开返回。
 
-只读 API 增加 `GET /api/telemetry/connections`（活动连接 + keyset 历史）、`GET /api/telemetry/sessions`、`GET /api/telemetry/traffic` 和 `GET /api/telemetry/events?cursor=&through=&filters=`；SSE 在现有 `/api/events` 追加 `telemetry` 事件，载荷带 captureSequence，复用 ready watermark/gap/补齐协议。查询限额、loopback、Host/Origin 检查与慢客户端策略沿用现有 Web 契约。
+只读 API 增加 `GET /api/telemetry/connections` 返回当前活动连接快照，`GET /api/telemetry/sessions`、`GET /api/telemetry/traffic` 和 `GET /api/telemetry/events?cursor=&through=&filters=` 查询历史事件；SSE 在现有 `/api/events` 追加 `telemetry` 事件，载荷带 captureSequence，复用 ready watermark/gap/补齐协议。查询限额、loopback、Host/Origin 检查与慢客户端策略沿用现有 Web 契约。
 
 UI 增加“连接”页：物理连接列表、会话明细、目标和状态、上传/下载累计曲线、时间/IP/传输/目标过滤；从 streamId/connectionId 查询相关日志（以日志 MDC/字段中可验证的 sessionKey 关联，不匹配则不伪造关联）。虚拟列表/分页和 textContent 安全策略沿用日志页。历史 Viewer 复用同一 UI 与 Repository，read-only session 也能查遥测历史。
 

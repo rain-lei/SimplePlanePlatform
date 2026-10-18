@@ -1,54 +1,113 @@
-# LogLens：Java 本地日志工作台
+# LogLens：Java 日志与连接监控工作台
 
-通过 Java Agent 与 Byte Buddy 接入日志，使用 Disruptor 缓冲事件，通过 SPI 定制责任链，由本地 YAML 驱动规则。处理结果按等级保存，并在本地网页中展示。
+LogLens 是一个通过 Byte Buddy Java Agent 接入目标 JVM 的本地观测工作台。它把应用日志采集、处理、历史查询和 Proxy Remote 连接遥测放在同一个 Agent、会话存储与网页面板中。目标应用无需编译期依赖 LogLens；Proxy Remote 监控通过运行时字节码增强观察连接和会话生命周期，并累计代理上下行字节数。
 
-当前已有运行实现和阶段性验证，正在按 SDD 完成第一版验收。LogLens 为暂定名称；完整交付尚未验收通过。
+Proxy Remote 融合功能已完成专项测试，并已部署到实际 `proxy-remote.service` 验证。LogLens 的基础 SDD 需求审计仍有开放项；状态和范围以 [SDD 验证记录](docs/sdd/verification.md) 与 [逐需求审计](docs/sdd/audit.md) 为准。
 
-- [详细架构设计](docs/loglens-architecture.md)
+## 能力
 
-设计接入方式：
+- 通过 Logback 适配器采集日志快照，并支持 observe 与受限的 replace-console 模式。
+- 通过 Proxy Remote 适配器观察物理连接、逻辑会话、会话状态和目标地址。
+- 统计 `forward(byte[])` 上行与 `writeBack(byte[])` 下行字节，按周期生成累计流量快照。
+- 在内嵌 Web UI 中查看活动连接、会话历史、流量与日志；支持筛选和从 Stream ID 检索相关日志。
+- 使用有界队列、活动跟踪上限、JSONL/SQLite 历史存储、查询水位与 SSE 更新。
+- 通过 SPI 扩展处理节点；可用 Viewer 查询和导出历史会话。
 
-```bash
-java -javaagent:loglens-agent.jar=config=./loglens.yaml -jar app.jar
-```
+## 架构与数据边界
 
-本仓库的开发流程与证据见 [需求规格](docs/sdd/requirements.md)、[设计契约](docs/sdd/design.md)、[任务追踪](docs/sdd/tasks.md)、[验证记录](docs/sdd/verification.md)。
+Agent 由 Byte Buddy 外壳、JDK-only bootstrap bridge、隔离加载的 LogLens runtime 和适配器组成。日志和网络遥测共用 Agent 生命周期、有限 Disruptor、会话目录、只读 HTTP/SSE 服务和 UI；遥测使用独立的 `TelemetryEvent` 类型，不进入日志折叠处理链。
 
-使用 IDEA 配套工具构建（PowerShell；脚本默认 IDEA 位于 D 盘，可通过 IdeaHome 参数修改）：
+监控只读取连接元数据、目标信息、会话状态和字节数组长度。代理 payload 不会被读取、解密、保存或交给后台线程。socket peer 和 Stream ID 是连接标识，不能据此认定为用户账号。日志采集依赖目标进程中的 Logback；是否能采集某个应用的日志取决于其实际日志框架和配置。
+
+Web 服务默认只绑定 `127.0.0.1`。远程查看应使用 SSH/VPN 隧道，不要向公网开放面板端口。遥测有连接数、会话数与队列容量上限；超过上限会记录 drop，不能承诺零丢失。
+
+详细设计见 [架构说明](docs/loglens-architecture.md)、[SDD 设计契约](docs/sdd/design.md) 和 [Proxy Remote 监控与部署指南](docs/proxy-remote-monitoring.md)。
+
+## 环境与构建
+
+- Java runtime 基线为 Java 17；Java 17 和 21 有实际验证。Java 8 目标字节码的 SimplePlane 服务不代表 Agent 能在 Java 8 JVM 运行。
+- 使用 IDEA 配套 JDK/Maven 构建。脚本默认 IDEA 在 D 盘，可用 `IdeaHome` 参数修改。
+- 缓存、临时目录、用户目录和构建产物定向到仓库 `.build/` 与模块 `target/`。
+- 项目应放在非 C 盘工作区。
 
 ```powershell
 & ./scripts/build.ps1 -MavenArguments @('verify')
 & ./scripts/package-release.ps1
 ```
 
-脚本将 Maven 仓库、JVM 临时目录和用户目录定向到工作区 `.build/`；模块产物在各自 `target/`。项目必须放在非 C 盘。Python 脚本不依赖第三方包。
+`package-release.ps1` 生成 `dist/loglens-agent.jar`、`dist/loglens-viewer.jar` 和 `dist/loglens-api.jar`，并检查发布包布局。发布前先运行 `verify`；打包脚本自身跳过测试。
 
-接入应用时使用 `dist/loglens-agent.jar`，配置路径相对启动目录；输出和插件目录相对 YAML。示例配置为 [loglens.yaml](loglens.yaml)，默认 observe，网页默认 `127.0.0.1:9527`。改 YAML 或插件后必须重启应用。仅声明 Maven 依赖不会启动 Agent。
+## 将 Agent 接入普通 Java 应用
 
-`dist/loglens-api.jar` 可用于编译外部 SPI 插件；release 脚本会统一生成 Agent、Viewer 和 API 三个公开 JAR，并检查入口类与 premain manifest。打包命令跳过测试，发布前应先运行 `verify`。
+把 `dist/loglens-agent.jar` 和 YAML 配置放到目标主机，然后在原 Java 启动参数中加入：
 
-历史查看与导出：
+```text
+-javaagent:/path/to/loglens-agent.jar=config=/path/to/loglens.yaml
+```
+
+Agent 参数必须作用于加载目标应用类的 JVM。配置或插件发生变化后，重启该 JVM。仅增加 Maven 依赖不会启动 Agent。
+
+配置示例见 [loglens.yaml](loglens.yaml)。默认模式是 `observe`，Web 端口为 `127.0.0.1:9527`。结构化存储必须启用才能使用 Web 查询。
+
+## 启用 Proxy Remote 监控
+
+在服务端配置中启用 `proxyRemote`，并为数据选择持久化目录：
+
+```yaml
+schemaVersion: 1
+application: simpleplane-proxy
+output:
+  directory: ./loglens-data
+  structured:
+    enabled: true
+proxyRemote:
+  enabled: true
+  sampleIntervalMillis: 1000
+  maxTrackedConnections: 10000
+  maxTrackedSessions: 50000
+web:
+  enabled: true
+  host: 127.0.0.1
+  port: 9527
+```
+
+如果服务由 systemd 管理，可给**实际运行 Proxy Remote 的服务单元**增加 drop-in：
+
+```ini
+[Service]
+Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/loglens/loglens-agent.jar=config=/opt/loglens/loglens.yaml"
+```
+
+然后执行 `sudo systemctl daemon-reload` 和 `sudo systemctl restart <proxy-service>`。重启会中断该服务上的现有连接；确认服务恢复后再查看面板。服务启动失败时应移除该 drop-in、daemon-reload 并重启，以恢复原启动方式。
+
+当前部署实例的文件布局、运行结果和限制见 [部署验证证据](docs/sdd/evidence/proxyremote-deployment.json)。
+
+## 本地打开远端面板
+
+保持服务器 Web 只监听 loopback，在本地建立 SSH 隧道：
+
+```powershell
+ssh -i <key.pem> -N -L 9527:127.0.0.1:9527 ec2-user@<server>
+```
+
+浏览器打开 [http://127.0.0.1:9527](http://127.0.0.1:9527)，切换到“连接”视图。隧道的本地端口和服务器面板端口应保持一致，以通过面板的 Host/Origin 本地请求校验；如果本地端口被占用，同时调整服务端 `web.port` 和隧道两端端口。不要提交私钥或将服务器真实地址写入共享文档。
+
+## 历史查看与导出
 
 ```powershell
 java -jar dist/loglens-viewer.jar '<session-directory>' 9527 '<scratch-directory>'
 java -jar dist/loglens-viewer.jar export '<session-directory>' '<report.html>' '<scratch-directory>'
 ```
 
-scratch 和导出文件应位于原会话外。开发环境运行 Java 时也应显式设置 `-Djava.io.tmpdir`、`-Duser.home`、`-Dorg.sqlite.tmpdir` 到 E 盘；使用 IDEA 自带 `jbr/bin/java.exe`，避免 PATH 上的旧 Java。
+scratch 和导出文件应放在原会话目录外。Viewer 使用只读历史查询，不会修改会话索引。
 
-普通 Java 与 Spring Boot 的可重复 Agent 验证：
+## 示例与验证
 
-```powershell
-& ./scripts/build.ps1 -MavenArguments @('package','-pl','examples/logback-demo,examples/springboot-demo,examples/custom-plugin,examples/custom-chain-plugin','-am')
-python scripts/verify-agent.py
-python scripts/verify-boot.py
-```
+- [Java/Spring Boot 与 SPI 示例](examples/README.md)
+- [需求规格](docs/sdd/requirements.md)
+- [设计契约](docs/sdd/design.md)
+- [任务追踪](docs/sdd/tasks.md)
+- [验证记录](docs/sdd/verification.md)
+- [逐需求审计](docs/sdd/audit.md)
 
-固定种子三模式性能对照（默认每个模式 100,000 条；结果和原始输出写入 `.build/performance/`）：
-
-```powershell
-& ./scripts/package-release.ps1
-python scripts/benchmark-modes.py
-```
-
-验证脚本默认使用 IDEA JBR 21，也可通过 `LOGLENS_JAVA` 指向 Java 17 运行 Agent 与 Spring Boot 实测；已验证 Corretto 17.0.14、Logback 1.5.18 和 Spring Boot 3.4.4。不能据此推断其他 Java/框架版本兼容。浏览器 UI、性能、故障矩阵与最终逐需求审计仍在进行；以验证记录中的实际证据为准。SPI 示例见 [examples/README.md](examples/README.md)。
+普通 Java、Spring Boot、插件及浏览器 UI 的可重复验证命令均记录在验证文档中。当前 Proxy Remote 连接页已通过 Java 17/21 Agent 测试和真实服务部署检查；基础 LogLens 的未完成审计项仍按 SDD 保持开放。

@@ -29,6 +29,23 @@
 | R23 | 没有 Attach/热加载/远程中心实现 | 最终源码与文档交叉检查 |
 | R24 | IDEA 脚本 E 盘 cache/tmp/user，实际使用 | 所有验证命令持续核对 C 盘无写入 |
 
+## Proxy Remote 扩展验收（R25–R34）
+
+本节补充连接监控扩展的当前证据；不改变上表 R01–R24 的基础需求状态，也不关闭 G2–G7。
+
+| 需求 | 当前证据 | 未完成或不足的证据 |
+|---|---|---|
+| R25 | Java 17/21 Agent 子 JVM 与真实 ProxyRemoteServer 烟测；实际 systemd proxy-remote.service 使用 Corretto 17.0.20 启动并通过健康检查 | Java 8 真实 JVM 未安装；其他服务端版本未验证 |
+| R26 | Agent/Netty 生命周期测试；线上活动连接 API 在部署验收时返回 16 项 | 生产验收只核对数量，没有读取或核实单条 peer/transport/关闭字段 |
+| R27 | 实际 SimplePlane 编译的 SessionManager/OutboundSession + EmbeddedChannel 验证 open/active/close 与 uplink=12/downlink=7 | 未在生产连接上检查逐会话字节最终值 |
+| R28 | Advice 只传结构化遥测，字节切点只读取数组长度；测试 JSONL 不包含 payload | 仍依赖目标服务版本维持匹配方法语义 |
+| R29 | 共用 Agent、bridge、Disruptor、会话目录和 UI 的实现及队列饱和/排空测试 | 无 |
+| R30 | 遥测 JSONL/SQLite、查询/SSE、gap 恢复、loopback 与 Host/Origin 测试；实际服务健康和本地 API 可达 | 真实公网网络边界由部署环境另行负责；面板必须通过隧道访问 |
+| R31 | Chrome 连接页交互 smoke；实际部署页面 HTTP 200，活动连接 API 返回数据 | 未在生产环境验收历史筛选、Stream-to-log 检索和真实流量图表 |
+| R32 | Web 绑定服务器 loopback，SSH 隧道访问，未开放公网监听 | 服务器防火墙和 SSH 账号策略不属于 Agent 自身保证 |
+| R33 | 共享队列饱和、非阻塞遥测发布、shutdown drain 与 drop 计数测试通过 | 真实线上峰值负载与长期丢弃率尚未测量 |
+| R34 | Java 17/21 Agent 验证；生产 Corretto 17.0.20 实际启动；Java 8 兼容守卫测试 | Java 8 行为仅测试守卫分支，未在 Java 8 JVM 上实跑 |
+
 ## 优先待办
 
 1. 修正已发现的需求缺口（决策持久化、元数据片段、历史未完成视图等），先维护契约。

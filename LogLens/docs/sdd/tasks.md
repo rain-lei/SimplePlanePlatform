@@ -41,3 +41,4 @@
 | T22 | [x] | T21 | 遥测查询 API、活动快照和带水位 typed SSE 已接线；容量为 1 的慢订阅溢出后明确 gap/关闭，新订阅水位界定范围并通过历史 API 补回缺失事件 | R30,R32 |
 | T23 | [x] | T22 | 连接/会话/流量 UI、过滤、Stream 日志检索和 SSE 更新已由 Playwright 浏览器 smoke 验收；历史 Viewer 共用只读 Repository | R31 |
 | T24 | [x] | T19,T23 | 最终 Agent 在 Java 17/21 实际 ProxyRemoteServer 中完成启动及 100 个 loopback 连接开关烟测（生命周期事件全量落盘）；实际 OutboundSession 字节计数、队列满载/排空、保留、gap 恢复、只读/loopback 安全和 Java 8 禁用守卫均有测试；部署说明已写入 `docs/proxy-remote-monitoring.md` | R25–R34 |
+| T25 | [x] | T24 | 将发布 Agent 接入实际 systemd proxy-remote.service，验证 Java 17 启动、面板健康和服务 MainPID 持有 loopback Web 端口；通过本地 SSH 隧道验证 UI/API，并记录脱敏部署证据与运维步骤 | R25,R31,R34 |
