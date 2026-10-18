@@ -1,0 +1,19 @@
+{
+  "test": "io.loglens.runtime.ProcessingRuntimeTest#blockPublisherLeavesDuringShutdownAndAcceptedBatchDrains",
+  "jvm": "IDEA JBR 21.0.6",
+  "ringBufferSize": 1024,
+  "overflowPolicy": "BLOCK",
+  "acceptedBeforeShutdown": 1024,
+  "blockedPublisherReturnedFalse": true,
+  "acceptedBatchDrained": true,
+  "sessionComplete": true,
+  "targetedClassTests": 4,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "surefireReport": "loglens-runtime/target/surefire-reports/TEST-io.loglens.runtime.ProcessingRuntimeTest.xml",
+  "fullReactorResult": "passed",
+  "fullReactorTestCount": 5,
+  "fullReactorFailures": 0,
+  "fullReactorFinishedAt": "2026-10-13T13:58:13+08:00"
+}

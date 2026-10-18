@@ -1,0 +1,17 @@
+{
+  "test": "io.loglens.storage.HistoryScaleTest#rebuildsAndKeysetPagesOneHundredThousandRecords",
+  "jvm": "IDEA JBR 21.0.6",
+  "rows": 100000,
+  "firstPage": 1000,
+  "lastPage": 1000,
+  "watermark": 100000,
+  "targetedRunElapsedMillis": 56040,
+  "fullReactorRunElapsedMillis": 70045,
+  "result": "passed",
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "incompleteMetadataRemainsIncomplete": true,
+  "pagesTraversed": 100,
+  "allSequencesContinuous": true
+}

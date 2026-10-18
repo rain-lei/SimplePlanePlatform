@@ -1,0 +1,19 @@
+{
+  "test": "io.loglens.runtime.ProcessingRuntimeTest#stuckPluginTimesOutAsIncompleteAndIsClosedAfterItReturns",
+  "jvm": "IDEA JBR 21.0.6",
+  "shutdownTimeoutMillis": 300,
+  "closeReturnsWithinTestBound": true,
+  "sessionComplete": false,
+  "sessionStatus": "INCOMPLETE",
+  "deferredPluginCloseObserved": true,
+  "sqliteAndSessionFilesReleased": true,
+  "targetedClassTests": 5,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "surefireReport": "loglens-runtime/target/surefire-reports/TEST-io.loglens.runtime.ProcessingRuntimeTest.xml",
+  "fullReactorResult": "passed",
+  "fullReactorTestCount": 5,
+  "fullReactorFailures": 0,
+  "fullReactorFinishedAt": "2026-10-13T13:58:13+08:00"
+}

@@ -1,0 +1,23 @@
+{
+  "scenario": "external example-order-tag factory after builtin-field-extract",
+  "runs": [
+    {
+      "jvm": "IDEA JBR 21.0.6",
+      "captured": 3,
+      "processed": 3,
+      "factoryTagged": 2,
+      "orderIds": ["O-1", "O-2"],
+      "redactionPassed": true,
+      "complete": true
+    },
+    {
+      "jvm": "Corretto 17.0.14",
+      "captured": 3,
+      "processed": 3,
+      "factoryTagged": 2,
+      "orderIds": ["O-1", "O-2"],
+      "redactionPassed": true,
+      "complete": true
+    }
+  ]
+}

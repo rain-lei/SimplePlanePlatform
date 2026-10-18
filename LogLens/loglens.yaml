@@ -1,0 +1,78 @@
+﻿schemaVersion: 1
+application: order-demo
+agent:
+  mode: observe
+  consoleAppenderNames: [CONSOLE]
+  failurePolicy: FALLBACK_OBSERVE
+  pluginsDirectory: ./plugins
+capture:
+  levels: [TRACE, DEBUG, INFO, WARN, ERROR]
+  includeLoggers: [com.example]
+  excludeLoggers: [io.loglens]
+  maxMessageChars: 16384
+  maxStackFrames: 128
+  captureCaller: false
+runtime:
+  ringBufferSize: 8192
+  overflowPolicy: DROP_NEWEST
+  tickMillis: 200
+  shutdownTimeoutMillis: 5000
+redaction:
+  mdcKeys: [token, password]
+  messageRules:
+    - id: token
+      pattern: '(token=)[^\s,]+'
+      replacement: '$1***'
+pipeline:
+  - id: extract
+    provider: builtin-field-extract
+    config:
+      rules:
+        - field: orderId
+          pattern: 'orderId=(?<value>[A-Za-z0-9-]+)'
+  - id: template
+    provider: builtin-template
+    config:
+      preferOriginalTemplate: true
+  - id: fold
+    provider: builtin-repeat-fold
+    config:
+      windowMillis: 3000
+      maxGroups: 10000
+      maxSamplesPerGroup: 3
+      bypassLevels: [ERROR]
+      groupBy: [logger, level, template, exceptionType]
+  - id: correlate
+    provider: builtin-correlation
+    config:
+      fields: [traceId, orderId]
+  - id: highlight
+    provider: builtin-highlight
+    config:
+      firstOccurrence: true
+      maxSeenTemplates: 10000
+      keywords: [支付超时, NullPointerException]
+output:
+  directory: ./logs
+  text:
+    combined: true
+    splitByLevel: true
+    rotateSizeMiB: 100
+    retentionDays: 7
+  structured:
+    enabled: true
+    rotateSizeMiB: 100
+    maxDiskMiB: 2048
+  console:
+    processed: false
+proxyRemote:
+  enabled: false
+  sampleIntervalMillis: 1000
+  maxTrackedConnections: 10000
+  maxTrackedSessions: 50000
+web:
+  enabled: true
+  host: 127.0.0.1
+  port: 9527
+  recentRecords: 5000
+  clientQueueSize: 1000

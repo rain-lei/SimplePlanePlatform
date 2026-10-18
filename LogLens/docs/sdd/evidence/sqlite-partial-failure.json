@@ -1,0 +1,30 @@
+{
+  "tests": [
+    "io.loglens.storage.SessionStorageTest#sqliteTagTransactionFailureKeepsJsonlAuthoritativeAndDoesNotBroadcast",
+    "io.loglens.storage.SessionStorageTest#capturedSqliteInsertFailureKeepsSegmentAndDisablesFurtherOutput"
+  ],
+  "jvm": "IDEA JBR 21.0.6",
+  "injectedFailures": [
+    "captured table insert aborted after captured JSONL append",
+    "tags insert aborted after processed records insert and processed JSONL append"
+  ],
+  "processedTransactionRolledBack": true,
+  "capturedAndProcessedSegmentsRemainAuthoritative": true,
+  "historyRebuildRestoresBothRows": true,
+  "failedProcessedRowBroadcast": false,
+  "failedRecordSequenceAdvanced": false,
+  "outputMarkedUnhealthy": true,
+  "sessionRemainsIncomplete": true,
+  "targetedSessionStorageTests": 9,
+  "fullReactorReports": 22,
+  "fullReactorTests": 80,
+  "fullReactorFailures": 0,
+  "fullReactorErrors": 0,
+  "fullReactorSkipped": 0,
+  "historyScaleSeconds": 61.94,
+  "latestSurefireReportTime": "2026-10-13T16:10:52+08:00",
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "surefireReport": "loglens-storage/target/surefire-reports/TEST-io.loglens.storage.SessionStorageTest.xml"
+}

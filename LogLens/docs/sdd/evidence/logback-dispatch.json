@@ -1,0 +1,21 @@
+{
+  "scenario": "TurboFilter plus additive child FileAppender and root Console/File Appenders, including context reset",
+  "runs": [
+    {
+      "jvm": "IDEA JBR 21.0.6",
+      "modes": {
+        "observe": {"captured": 4, "processed": 3, "turboDenied": true, "childFilePreserved": true},
+        "replace-console": {"captured": 4, "processed": 3, "turboDenied": true, "childFilePreserved": true}
+      },
+      "asyncReplaceFallback": {"captured": 3, "consolePreserved": true, "filePreserved": true, "diagnostic": "UNSUPPORTED_CONSOLE_WRAPPER"}
+    },
+    {
+      "jvm": "Corretto 17.0.14",
+      "modes": {
+        "observe": {"captured": 4, "processed": 3, "turboDenied": true, "childFilePreserved": true},
+        "replace-console": {"captured": 4, "processed": 3, "turboDenied": true, "childFilePreserved": true}
+      },
+      "asyncReplaceFallback": {"captured": 3, "consolePreserved": true, "filePreserved": true, "diagnostic": "UNSUPPORTED_CONSOLE_WRAPPER"}
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "test": "io.loglens.web.LocalWebServerTest#slowTcpSseClientIsDroppedWithoutBlockingPublisherOrHealthyClient",
+  "jvm": "IDEA JBR 21.0.6",
+  "rawLoopbackTcp": true,
+  "slowSocketReceiveBufferBytes": 1024,
+  "eventHubQueueCapacity": 16,
+  "recordsPublished": 500,
+  "messageBytes": 32768,
+  "slowSubscriptionDropped": true,
+  "healthySocketContinued": true,
+  "interPublishPacingMillis": 5,
+  "publisherCallDurationBoundMillis": 1000,
+  "result": "passed",
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "surefireReport": "loglens-web/target/surefire-reports/TEST-io.loglens.web.LocalWebServerTest.xml",
+  "fullReactorResult": "passed",
+  "fullReactorTestCount": 78,
+  "fullReactorFailures": 0,
+  "fullReactorFinishedAt": "2026-10-13T15:45:31+08:00",
+  "testMethodElapsedMillis": 5155
+}

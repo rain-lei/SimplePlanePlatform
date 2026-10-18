@@ -1,0 +1,21 @@
+{
+  "scenario": "two distinct LogChainProvider implementations in separate external JARs",
+  "runs": [
+    {
+      "jvm": "IDEA JBR 21.0.6",
+      "nonStrictExitCode": 0,
+      "diagnostic": "multiple LogChainProviders",
+      "businessLogPreserved": true,
+      "strictExitCode": 1,
+      "strictApplicationStarted": false
+    },
+    {
+      "jvm": "Corretto 17.0.14",
+      "nonStrictExitCode": 0,
+      "diagnostic": "multiple LogChainProviders",
+      "businessLogPreserved": true,
+      "strictExitCode": 1,
+      "strictApplicationStarted": false
+    }
+  ]
+}
