@@ -71,6 +71,14 @@ sudo systemctl is-active proxy-remote.service
 
 部署时服务运行在 Corretto 17.0.20。最终健康检查确认面板监听进程 PID 与 proxy-remote.service 的 MainPID 一致。脱敏结果见 [部署验证证据](sdd/evidence/proxyremote-deployment.json)。
 
+## Docker Compose 部署
+
+仓库根目录的 Docker 配置也会把 Proxy Remote 与 LogLens Agent 合并为同一 JVM：`docker/Dockerfile.remote` 在 Java 17 构建阶段编译两部分，并将 Agent 作为 `-javaagent` 注入 Proxy Remote；最终镜像使用 Java 17 runtime。Agent 配置挂载自 `docker/loglens-proxyremote.yaml`，会话历史持久化在 `./loglens-data/`。操作步骤、数据保留和故障排查见[Docker 部署说明](../../docs/docker部署说明.md)。
+
+容器配置仍将 `web.host` 设为 `127.0.0.1`。由于 Docker 发布端口不能直达容器 loopback，`loglens-panel-relay` 与 Proxy Remote 共享网络命名空间，只把容器内 `127.0.0.1:9527` 转发到 19527；主服务将宿主机映射限制为 `127.0.0.1:9527`。远程管理仍使用 SSH 隧道，不要把该端口改为全网卡监听。
+
+默认 compose 不发布代理 TCP 9090；同机 `proxy-local` 使用 compose 内部 DNS。需要外部客户端时显式叠加 `docker-compose.remote-public.yml`，并在云防火墙中限制来源。生产部署前替换 `docker/remote.yml` 与 `docker/proxy.yml` 中的示例共享密钥。Agent 容器以非 root UID 10001 运行，确认持久化数据目录可写。
+
 ## 本地访问
 
 Web 服务绑定 127.0.0.1:9527，不要在防火墙或反向代理中将它公开到公网。在本地终端建立 SSH 隧道：

@@ -438,3 +438,9 @@ T16–T24 的 Proxy Remote 融合验收已完成。边界仍为：没有用真�
 部署后 systemd 服务为 active，面板监听进程 PID 与服务 MainPID 一致，排除了其他进程占用面板端口的情况。健康 API 返回 `accepting=true`、`outputHealthy=true`、`telemetryDropped=0`。在运维工作站建立 `127.0.0.1:9527 -> server loopback 127.0.0.1:9527` SSH 隧道后，浏览器页面返回 HTTP 200、标题为“LogLens / 日志工作台”；本地 health 和活动连接 API 均成功。该时点活动连接数为 16，随线上流量变化，不是固定验收值。Agent SHA-256 和脱敏部署摘要见 [proxyremote-deployment.json](evidence/proxyremote-deployment.json)。
 
 该检查证明实际 Proxy Remote 服务中的 Agent 已启动、面板由正确 JVM 提供且隧道可用。检查过程没有读取 peer 地址或 payload，也没有通过生产请求验证每个会话的字节值；生产 Logback 日志捕获和字节累计分别由前述专项测试覆盖。现有服务重启会短暂中断代理连接，后续配置变更需按 [部署指南](../proxy-remote-monitoring.md) 维护。基础 LogLens R01–R24 的既有审计缺口和 G2–G7 门禁仍开放。
+
+## Docker 集成配置检查（2026-10-19）
+
+更新 Docker Remote 镜像，使其在 Java 17+ runtime 中启动 Proxy Remote 与同 JVM LogLens Agent；新增 loopback 面板 relay、持久化数据挂载、外部 Agent YAML、仅本机发布的面板/代理端口，以及显式的公网 9090 compose override。使用 LogLens runtime 内的 SnakeYAML 2.3 在 Corretto 17.0.14 下解析 `docker-compose.yml`、`docker-compose.remote-public.yml`、`docker/remote.yml`、`docker/proxy.yml` 与 `docker/loglens-proxyremote.yaml`；并由真实 `ConfigLoader` 加载 Agent 配置，确认 Proxy Remote 监控、结构化存储与 `127.0.0.1:9527` loopback Web 均启用。静态检查通过。
+
+当前执行环境没有 Docker 或 Compose CLI，因此尚未实际构建镜像、启动容器、验证 `network_mode: service:proxy-remote` 下的 relay 发布与容器重启行为，也未通过 Docker 部署执行 SSH 隧道浏览器验收。R35/T26 保持待容器环境验收，不因 YAML/Agent 配置校验通过而标为完成。

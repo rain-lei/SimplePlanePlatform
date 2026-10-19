@@ -133,6 +133,8 @@ ssh -i <key.pem> -N -L 9527:127.0.0.1:9527 ec2-user@<server>
 
 详细能力、配置、systemd 部署与数据边界见 [LogLens 使用说明](LogLens/README.md)、[Proxy Remote 监控部署指南](LogLens/docs/proxy-remote-monitoring.md) 和 [脱敏部署验证记录](LogLens/docs/sdd/verification.md#proxy-remote-实际-systemd-部署与本地面板验收2026-10-18)。LogLens 的基础 SDD 审计仍有开放项，不能把专项连接监控验收等同为整个子项目全部验收完成。
 
+Docker 部署也已集成 LogLens：Proxy Remote 镜像构建并注入 Agent，运行时统一使用 Java 17；JSONL/SQLite 历史写入 `loglens-data/`。面板仍绑定容器 loopback，由 relay 仅发布到宿主机 `127.0.0.1:9527`，远程查看继续使用上面的 SSH 隧道。详细端口边界、配置和可选的远程 9090 发布见 [Docker 部署说明](docs/docker部署说明.md)。
+
 ## 快速开始
 
 ### 环境要求
@@ -755,7 +757,7 @@ docker compose logs -f          # 查看日志
 docker compose down             # 停止
 ```
 
-容器模式下 proxy-local 的 1080 端口映射到宿主机，通过服务名 `proxy-remote` 连接服务端。加密配置见 `docker/proxy.yml` 和 `docker/remote.yml`。
+容器模式下，Proxy Remote 与 LogLens Agent 在同一个 Java 17 JVM 中运行；LogLens Web 保持 loopback 绑定，通过 relay 发布到宿主机 `127.0.0.1:9527`，历史数据保存在 `loglens-data/`。proxy-local 通过 compose 服务名连接 Proxy Remote，宿主机代理仅监听 `127.0.0.1:1080`。默认不向公网发布服务端 9090；确需外部客户端连接时使用 `docker-compose.remote-public.yml` 覆盖配置，并限制防火墙来源。面板远程访问使用 SSH 隧道。完整说明见 [Docker 部署说明](docs/docker部署说明.md)。
 
 ## 开启加密
 

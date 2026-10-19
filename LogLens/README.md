@@ -82,6 +82,8 @@ Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/loglens/loglens-agent.jar=config=
 
 当前部署实例的文件布局、运行结果和限制见 [部署验证证据](docs/sdd/evidence/proxyremote-deployment.json)。
 
+仓库根目录的 Docker Compose 也会在 Proxy Remote 同一 JVM 中注入 Agent，并将 LogLens 数据持久化到 `loglens-data/`。Docker 镜像使用 Java 17+；面板保持 loopback 绑定，由 relay 仅发布到宿主机 `127.0.0.1:9527`，默认不发布代理 9090。完整启动、端口边界和公网端口显式覆盖步骤见 [Docker 部署说明](../docs/docker部署说明.md)。容器镜像尚需在具备 Docker/Compose 的环境完成实际构建验收。
+
 ## 本地打开远端面板
 
 保持服务器 Web 只监听 loopback，在本地建立 SSH 隧道：

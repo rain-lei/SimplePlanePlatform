@@ -1,11 +1,11 @@
 # =========================================================
-# proxy-remote 远程服务端镜像（多阶段构建）
+# proxy-remote + LogLens 服务端镜像（多阶段构建）
 # 在项目根目录执行构建：
 #   docker build -f docker/Dockerfile.remote -t netty-proxy-remote:1.0.0 .
 # =========================================================
 
 # ---------- Stage 1: 构建 ----------
-FROM maven:3.9-eclipse-temurin-8 AS build
+FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /build
 
 # 先拷 pom 预热依赖缓存（命中缓存可大幅加速重复构建）
@@ -26,19 +26,38 @@ COPY . .
 RUN mvn -q -DskipTests clean package \
  && mvn -q -pl proxy-remote -DskipTests dependency:copy-dependencies
 
-# ---------- Stage 2: 运行 ----------
-FROM eclipse-temurin:8-jre
+# LogLens 使用 Java 17 API；构建独立 Agent，再在运行阶段通过 -javaagent 注入。
+RUN mvn -q -f LogLens/pom.xml -DskipTests package
+
+# ---------- Stage 2: 组装 Agent 发布包 ----------
+FROM python:3.12-slim AS agent-package
+WORKDIR /workspace/LogLens
+COPY LogLens/scripts/package-agent.py scripts/package-agent.py
+COPY --from=build /build/LogLens/loglens-agent/target/loglens-agent-0.1.0-SNAPSHOT-runtime.jar loglens-agent/target/
+COPY --from=build /build/LogLens/loglens-agent/target/classes/io/loglens/launcher/LogLensAgent.class loglens-agent/target/classes/io/loglens/launcher/
+COPY --from=build /build/LogLens/loglens-bootstrap/target/loglens-bootstrap-0.1.0-SNAPSHOT.jar loglens-bootstrap/target/
+RUN python scripts/package-agent.py
+
+# ---------- Stage 3: 运行 ----------
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 
 # 拷贝本模块编译产物（含 classpath 资源：remote.yml / logback.xml / META-INF）
 COPY --from=build /build/proxy-remote/target/classes        ./classes
 # 拷贝运行期依赖
 COPY --from=build /build/proxy-remote/target/dependency      ./lib
+# 拷贝融合后的连接监控与日志采集 Agent
+COPY --from=agent-package /workspace/LogLens/dist/loglens-agent.jar ./agent/loglens-agent.jar
 
-# /app/config 用于挂载外部配置（置于 classpath 最前，可覆盖内置 remote.yml）
-RUN mkdir -p /app/config
+# 配置只读挂载；Agent 目录需要可写，以便安全解包隔离 runtime；数据写入独立持久化挂载。
+RUN useradd --system --uid 10001 --create-home loglens \
+ && mkdir -p /app/config /var/lib/loglens \
+ && chown -R loglens:loglens /app/agent /var/lib/loglens
+
+USER loglens
 
 EXPOSE 9090
 
-ENTRYPOINT ["java", "-cp", "/app/config:/app/classes:/app/lib/*", \
+ENTRYPOINT ["java", "-javaagent:/app/agent/loglens-agent.jar=config=/app/config/loglens.yaml", \
+            "-cp", "/app/config:/app/classes:/app/lib/*", \
             "com.proxy.remote.ProxyRemoteServer"]

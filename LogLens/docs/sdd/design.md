@@ -122,3 +122,4 @@ UI 增加“连接”页：物理连接列表、会话明细、目标和状态�
 | D09 | 日志与遥测共用 Agent、队列、存储会话和控制台；遥测保留独立强类型与持久化表，绕过日志语义处理链 | 避免维护第二个采集进程，同时防止高频字节计数被日志聚合/脱敏语义破坏 |
 | D10 | 字节计数在 forward/writeBack 方法边界累计，并按间隔发累计快照 | 避免每数据包写事件；边界直接对应上/下行代理 payload 长度 |
 | D11 | Agent 适配目标 Java 17/21；不承诺 Java 8 运行时兼容 | LogLens 全模块以 Java 17 API 编译；代理模块字节码目标为 Java 8 不代表 Agent 可运行于 Java 8 |
+| D12 | Docker Remote 镜像在 Java 17+ 中以 premain 启动 LogLens；Web 保持容器 loopback，由共享网络命名空间 relay 转发到宿主机 loopback；9090 默认仅 compose 内网可见，外部接入通过单独 compose override 显式启用 | 容器网卡发布不能直接访问应用 loopback；保持 R32 Web 安全契约，同时让 SSH 隧道可以访问；避免默认暴露代理端口 |

@@ -45,6 +45,7 @@
 | R32 | Web 绑定服务器 loopback，SSH 隧道访问，未开放公网监听 | 服务器防火墙和 SSH 账号策略不属于 Agent 自身保证 |
 | R33 | 共享队列饱和、非阻塞遥测发布、shutdown drain 与 drop 计数测试通过 | 真实线上峰值负载与长期丢弃率尚未测量 |
 | R34 | Java 17/21 Agent 验证；生产 Corretto 17.0.20 实际启动；Java 8 兼容守卫测试 | Java 8 行为仅测试守卫分支，未在 Java 8 JVM 上实跑 |
+| R35 | Dockerfile/compose、独立 loopback relay、持久化目录和显式公网端口覆盖已实现并更新部署文档 | Docker/Compose CLI 与容器引擎在当前环境不可用，镜像构建、共享网络命名空间发布与真实 SSH 隧道尚未执行；compose 语法需在有 Docker 环境时验收 |
 
 ## 优先待办
 

@@ -1,181 +1,82 @@
 # Docker 部署说明
 
-本项目运行时由两个进程组成：
+Docker 编排同时支持 Proxy Remote、LogLens 监控面板和可选的 proxy-local。LogLens Agent 与 Proxy Remote 运行在同一个 Java 17 JVM 中，通过 Byte Buddy 观察连接、会话、字节数并采集受支持的 Logback 日志；无需修改服务端业务源码。
 
-- **proxy-remote**：远程服务端，接收加密隧道流量并代为访问目标站点（监听 9090）。
-- **proxy-local**：本地客户端，对外暴露 SOCKS5 / HTTP CONNECT 代理端口（监听 1080），把流量经加密隧道转发给服务端。
+## 服务与端口
 
-下文给出两端的 Docker 镜像构建方式，以及用 `docker-compose` 一键编排的方法。
+| 服务 | 容器监听 | 宿主机发布 | 用途 |
+|---|---:|---:|---|
+| `proxy-remote` | TCP 9090 | 默认不发布 | 代理隧道，仅 compose 网络可访问 |
+| LogLens Web | `127.0.0.1:9527` | 不直接发布 | Agent 内嵌的只读面板 |
+| `loglens-panel-relay` | TCP 19527 → 容器 loopback 9527 | `127.0.0.1:9527` | 让宿主机 SSH 隧道访问面板 |
+| `proxy-local` | TCP 1080 | `127.0.0.1:1080` | 宿主机本地 SOCKS5 / HTTP CONNECT 代理 |
 
----
+LogLens Web 强制绑定 loopback。Docker 的端口发布无法直接连接容器自身的 loopback，因此 relay 与 `proxy-remote` 共享网络命名空间，单独转发到容器内 19527；宿主机只绑定 `127.0.0.1:9527`。面板本身仍只接受本地请求，远程管理应通过 SSH 隧道，不能把 9527 映射到 `0.0.0.0`。
 
-## 1. 文件清单
+## 一键启动
 
-```
-SimplePlanePlatform/
-├── docker-compose.yml          # 一键编排两端
-├── .dockerignore               # 构建上下文忽略规则
-└── docker/
-    ├── Dockerfile.remote       # 服务端镜像（多阶段构建）
-    ├── Dockerfile.local        # 客户端镜像（多阶段构建）
-    ├── remote.yml              # 服务端外部配置（挂载用）
-    └── proxy.yml               # 客户端外部配置（挂载用）
-```
-
-镜像采用**多阶段构建**：第一阶段用 `maven:3.9-eclipse-temurin-8` 编译打包，第二阶段用轻量的 `eclipse-temurin:8-jre` 运行，最终镜像不含 Maven 与源码。
-
-> **为什么不用 `java -jar`？**
-> 当前项目的 `maven-jar-plugin` 只写了 `Main-Class`，没有打 fat-jar，jar 内也没有 Class-Path。
-> 因此镜像里采用「**瘦 jar + 依赖目录**」方式：构建阶段执行 `dependency:copy-dependencies` 把 Netty/SnakeYAML/Logback 等依赖拷到 `lib/`，运行时用 `-cp "config:classes:lib/*"` 启动。
-> 这样**无需改动任何现有 pom**。
-
----
-
-## 2. 一键启动（推荐：docker-compose）
-
-在**项目根目录**执行：
+在项目根目录执行：
 
 ```bash
-# 构建镜像并后台启动两端
 docker compose up -d --build
-
-# 跟踪日志
-docker compose logs -f
-
-# 只看某一端
+docker compose ps
 docker compose logs -f proxy-remote
-docker compose logs -f proxy-local
-
-# 停止并移除容器与网络
-docker compose down
 ```
 
-> 旧版本 Docker 用 `docker-compose`（带连字符）替代 `docker compose`。
+首次构建会编译 Java 8 目标字节码的代理模块和 Java 17 LogLens Agent；最终 Proxy Remote 镜像使用 Java 17 运行时。Agent 配置在 `docker/loglens-proxyremote.yaml`，日志和遥测历史持久化到 `./loglens-data/`。`docker/remote.yml` 和 `docker/proxy.yml` 中的加密算法与密钥必须一致；部署前将示例密钥替换为强随机值，不要把实际密钥提交到版本库。
 
-编排关系说明：
-
-- 两个容器在同一自定义 bridge 网络 `proxy-net` 中，`proxy-local` 通过**服务名 `proxy-remote`** 连接服务端（已在 `docker/proxy.yml` 的 `remoteServers.host` 中配置）。
-- **仅 `proxy-local` 的 1080 端口映射到宿主机**；9090 只在容器内网用于两端通信，不对外暴露。
-- `proxy-remote` 配了 healthcheck（探测 9090 TCP 可连），`proxy-local` 通过 `depends_on: condition: service_healthy` **等服务端就绪后再启动**，保证启动顺序正确。
-
-启动成功后，宿主机上即可使用代理：
+本机面板地址：<http://127.0.0.1:9527/>。远程服务器上部署时，在管理工作站建立 SSH 隧道：
 
 ```bash
-# SOCKS5
-curl -x socks5h://127.0.0.1:1080 https://www.example.com -v
-# HTTP CONNECT（同端口）
-curl -x http://127.0.0.1:1080 https://www.example.com -v
+ssh -i <key.pem> -N -L 9527:127.0.0.1:9527 <user>@<server>
 ```
 
----
+随后在工作站访问 <http://127.0.0.1:9527/>。隧道本地端口和服务器面板端口需一致，以通过 Host/Origin 校验。
 
-## 3. 单独构建 / 运行（不用 compose）
-
-### 3.1 构建镜像（项目根目录）
+常用维护命令：
 
 ```bash
-docker build -f docker/Dockerfile.remote -t netty-proxy-remote:1.0.0 .
-docker build -f docker/Dockerfile.local  -t netty-proxy-local:1.0.0  .
+docker compose logs -f proxy-remote loglens-panel-relay
+docker compose restart proxy-remote
+docker compose down                 # 保留 loglens-data
+docker compose down -v              # 不会删除 bind mount 的 loglens-data
 ```
 
-### 3.2 运行服务端
+修改 `docker/loglens-proxyremote.yaml` 或代理配置后需重建/重启 `proxy-remote`。重启该容器会断开现有代理连接。升级 Agent 或 Java 运行时需执行 `docker compose up -d --build proxy-remote loglens-panel-relay`。
+
+## 从其他机器连接 Proxy Remote
+
+默认 compose 不发布 9090。只有确实需要接受其他机器上的 `proxy-local` 时才叠加公网端口配置：
 
 ```bash
-docker run -d --name netty-proxy-remote \
-  -p 9090:9090 \
-  -v "$(pwd)/docker/remote.yml:/app/config/remote.yml:ro" \
-  netty-proxy-remote:1.0.0
+docker compose -f docker-compose.yml -f docker-compose.remote-public.yml up -d --build
 ```
 
-### 3.3 运行客户端
+该覆盖文件只发布 Proxy Remote TCP 9090；请同时配置云安全组/主机防火墙，仅允许受信任的客户端 IP。LogLens 9527 仍只绑定宿主机 loopback。拆分两端部署时，客户端的 `remoteServers.host` 应填写服务端可达的地址，并保持两端 `cipher` 与 `cipherKey` 一致。
+
+## 配置与数据
+
+- `docker/remote.yml`：Proxy Remote 的监听和加密配置。`cipherKey` 示例值仅供开发，生产必须替换。
+- `docker/proxy.yml`：proxy-local 连接服务端的配置；同 compose 网络通过服务名 `proxy-remote` 访问。
+- `docker/loglens-proxyremote.yaml`：Agent 的日志过滤、脱敏、遥测上限、loopback Web 端口及存储保留策略。监控默认启用。
+- `loglens-data/`：LogLens 会话、JSONL 和 SQLite 历史数据；备份时复制该目录。容器使用 UID 10001 写入数据，Linux 主机可按需将目录属主设置为 UID/GID 10001。
+- `ladder.pem`、`.build/`、Maven/Rust/Gradle 缓存、运行日志和 LogLens 数据均在 `.dockerignore` 中排除，避免把私钥、构建缓存或运行数据发送到 Docker 构建上下文。
+
+Agent 采用 `observe` 模式，不接管或替换原始控制台日志。遥测采集只读取字节数组长度，不读取、解密、保存代理 payload。活动连接/会话、事件队列和历史磁盘空间均有上限；达到上限时会报告 drop 或按保留策略清理，不承诺零丢失。socket peer 是网络地址，不是账号身份。
+
+## 排查
 
 ```bash
-docker run -d --name netty-proxy-local \
-  -p 1080:1080 \
-  -v "$(pwd)/docker/proxy.yml:/app/config/proxy.yml:ro" \
-  -v "$(pwd)/logs:/app/logs" \
-  netty-proxy-local:1.0.0
+docker compose ps
+docker compose logs --tail=200 proxy-remote
+docker compose logs --tail=100 loglens-panel-relay
+curl --max-time 5 http://127.0.0.1:9527/api/health
 ```
 
-> 单独运行时两个容器不在同一 compose 网络，`proxy.yml` 里的 `remoteServers.host` 不能再写 `proxy-remote`，
-> 需改成宿主机可达的地址（例如服务端宿主机 IP，或在 macOS/Windows 上用 `host.docker.internal`）。
+- `proxy-remote` 不健康：先看 Agent 初始化诊断和 Java 启动日志，再检查 `docker/remote.yml`、配置挂载及数据目录权限。
+- 面板本机不可访问：确认 `proxy-remote` 和 relay 均为 healthy，宿主机 9527 未被占用，并确认 compose 发布地址是 `127.0.0.1`。
+- SSH 隧道已建立但页面不可用：服务器本机应能访问 `http://127.0.0.1:9527/api/health`；检查远端 9527 发布与 relay 日志。不要把 Agent 的 `web.host` 改成 `0.0.0.0`。
+- 代理无法连接：同 compose 模式检查 `remoteServers.host: proxy-remote` 和两端密钥；分开部署模式检查服务端 TCP 9090、防火墙和真实地址。
+- Java 版本错误：LogLens Agent 需要 Java 17 或更高版本；不要把 Proxy Remote 镜像运行时降回 Java 8。
 
----
-
-## 4. 配置说明（重点）
-
-外部配置通过挂载到容器的 `/app/config/` 生效。该目录在 classpath 最前，会**覆盖镜像内置的同名配置**。
-
-### 4.1 两端必须一致的两项
-
-| 配置项 | 文件 | 说明 |
-|--------|------|------|
-| `cipher` | remote.yml / proxy.yml | 加密算法，任一不一致 → 隧道解密失败 |
-| `cipherKey` | remote.yml / proxy.yml | 加密密钥，**务必改成强随机值**，且两端相同 |
-
-示例配置默认 `cipher: aes-gcm`、`cipherKey: change-me-to-a-strong-shared-key`，**上生产前务必替换密钥**。
-
-### 4.2 容器内必须关闭系统代理
-
-`docker/proxy.yml` 中已设置：
-
-```yaml
-systemProxy:
-  enabled: false
-```
-
-原因：proxy-local 的“自动设置系统代理”功能改的是**容器内部**的系统代理，对宿主机无意义，且在精简镜像里可能因缺少 `networksetup`/`gsettings` 而报错（代码里是非致命警告，但无实际作用）。容器场景下应由使用方应用**显式**把代理指向宿主机 `127.0.0.1:1080`。
-
-### 4.3 两端分开部署
-
-若服务端和客户端部署在不同机器，不使用同一 compose：
-
-1. 在服务端机器只起 `proxy-remote`，并把 9090 映射/放行到外网（`docker/Dockerfile.remote` 已 `EXPOSE 9090`，compose 中取消 `ports` 注释或用 `docker run -p 9090:9090`）。
-2. 在客户端机器修改 `docker/proxy.yml` 的 `remoteServers.host` 为服务端的真实 IP/域名，只起 `proxy-local`。
-3. 确认两端 `cipher`/`cipherKey` 一致，且服务端 9090 在防火墙/安全组放行。
-
----
-
-## 5. 日志与数据
-
-| 容器 | 日志位置 | 持久化 |
-|------|----------|--------|
-| proxy-remote | 标准输出（`docker logs` 可见） | 无需挂载 |
-| proxy-local | 标准输出 + 容器内 `/app/logs/proxy-local.log` | compose 已把 `./logs` 挂到 `/app/logs` |
-
-查看：
-
-```bash
-docker compose logs -f
-# 或本地端文件
-tail -f logs/proxy-local.log
-```
-
----
-
-## 6. 常见问题
-
-| 现象 | 原因 | 处理 |
-|------|------|------|
-| `proxy-local` 启动后连不上服务端 | 服务端未就绪 / host 配错 | compose 已用 healthcheck 控制顺序；分开部署时核对 `remoteServers.host` |
-| 能连接但数据无响应 / 报解密错误 | 两端 `cipher`/`cipherKey` 不一致 | 对齐 remote.yml 与 proxy.yml |
-| 构建很慢 | 首次拉取基础镜像 + 下载 Maven 依赖 | 后续构建命中缓存会快很多；可配置 Maven 镜像源加速 |
-| 1080 端口冲突 | 宿主机 1080 被占用 | 改 compose 端口映射，如 `"11080:1080"` |
-| healthcheck 一直 unhealthy | 基础镜像无 bash | 本项目用的 `eclipse-temurin:8-jre` 含 bash；若换镜像需调整 healthcheck 命令 |
-
----
-
-## 7. 速查命令
-
-```bash
-# 构建并启动
-docker compose up -d --build
-# 重启某一端（改了配置后）
-docker compose restart proxy-local
-# 重新构建某一端
-docker compose build proxy-remote && docker compose up -d proxy-remote
-# 进容器排查
-docker exec -it netty-proxy-local sh
-# 停止并清理
-docker compose down
-```
+更多监控边界与非 Docker 部署流程见 [Proxy Remote 监控部署指南](../LogLens/docs/proxy-remote-monitoring.md)。

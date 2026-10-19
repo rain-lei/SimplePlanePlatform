@@ -1,0 +1,8 @@
+# 只在容器网络命名空间内将可发布端口转发到 LogLens loopback Web 服务。
+FROM alpine:3.21
+RUN apk add --no-cache socat \
+ && addgroup -S relay \
+ && adduser -S -D -H -G relay relay
+USER relay
+EXPOSE 19527
+ENTRYPOINT ["socat", "TCP-LISTEN:19527,bind=0.0.0.0,fork,reuseaddr", "TCP:127.0.0.1:9527"]
