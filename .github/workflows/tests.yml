@@ -27,6 +27,7 @@ on:
       - "tun-adapter/**"
       - "dashboard/**"
       - "pom.xml"
+      - "docs/design/crypto*vector*"
       - ".github/workflows/tests.yml"
   pull_request:
     branches: [main, master]
@@ -35,6 +36,7 @@ on:
       - "tun-adapter/**"
       - "dashboard/**"
       - "pom.xml"
+      - "docs/design/crypto*vector*"
       - ".github/workflows/tests.yml"
 
 concurrency:

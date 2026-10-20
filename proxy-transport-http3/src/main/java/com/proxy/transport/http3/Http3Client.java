@@ -45,7 +45,6 @@ public final class Http3Client implements Client {
         thread.setDaemon(true);
         return thread;
     });
-    private final Cipher cipher;
 
     public Http3Client(URL url, MessageHandler handler) {
         if (!(handler instanceof ChannelHandler)) {
@@ -54,7 +53,7 @@ public final class Http3Client implements Client {
         }
         this.url = url;
         this.messageHandler = handler;
-        this.cipher = createCipher(url);
+        createCipher(url); // Validate suite/key before connecting; stream state is never shared.
         this.connection = new Http3Connection(url);
         try {
             connection.connect();
@@ -108,6 +107,7 @@ public final class Http3Client implements Client {
         ChannelInitializer<QuicStreamChannel> initializer = new ChannelInitializer<QuicStreamChannel>() {
             @Override
             protected void initChannel(QuicStreamChannel channel) {
+                Cipher cipher = createCipher(url);
                 state.channel = channel;
                 state.phase = Http3StreamState.Phase.WAITING_RESPONSE;
                 channel.config().setOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
@@ -248,9 +248,9 @@ public final class Http3Client implements Client {
     }
 
     private static Cipher createCipher(URL url) {
-        Cipher cipher = ExtensionLoader.getLoader(Cipher.class).getExtension(url.getParameter("cipher", "none"));
+        Cipher cipher = ExtensionLoader.getLoader(Cipher.class).newExtension(url.getParameter("cipher", "none"));
         String key = url.getParameter("cipherKey", "");
-        cipher.init(key.isEmpty() ? new CipherConfig() : new CipherConfig(key.getBytes()));
+        cipher.init(key.isEmpty() ? new CipherConfig() : new CipherConfig(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         return cipher;
     }
 

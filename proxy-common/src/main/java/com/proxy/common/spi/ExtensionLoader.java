@@ -135,6 +135,27 @@ public class ExtensionLoader<T> {
         return getExtension(spi.value());
     }
 
+    /** Creates an uncached instance for stateful extensions such as per-stream ciphers. */
+    public T newExtension(String name) {
+        if (name == null || name.isEmpty()) {
+            throw new IllegalArgumentException("Extension name must not be null or empty");
+        }
+        loadExtensionClassesIfNeeded();
+        Class<? extends T> clazz = extensionClasses.get(name);
+        if (clazz == null) {
+            throw new IllegalArgumentException("No extension '" + name + "' for type: " + type.getName());
+        }
+        try {
+            return clazz.getDeclaredConstructor().newInstance();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to create extension instance: " + clazz.getName(), e);
+        }
+    }
+
+    public T newDefaultExtension() {
+        return newExtension(type.getAnnotation(SPI.class).value());
+    }
+
     /**
      * 获取所有已激活的扩展实例（通过 @Activate 注解过滤）
      *

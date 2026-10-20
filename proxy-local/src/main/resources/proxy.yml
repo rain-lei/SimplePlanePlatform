@@ -17,6 +17,8 @@ remoteServers:
       connectionPendingHardLimit: 67108864
       writeBufferLowWaterMark: 262144
       writeBufferHighWaterMark: 1048576
+    # 新连接建议两端一起使用 chacha20-poly1305-v2 / aes-gcm-v2 + 32字节随机密钥。
+    # 此处 chacha20 仅为现有远程服务保留兼容，不能单独切换一端。
     cipher: chacha20
     cipherKey: your-cipher-key
     ssl: false

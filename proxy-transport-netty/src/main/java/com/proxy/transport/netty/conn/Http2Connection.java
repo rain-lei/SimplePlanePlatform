@@ -467,10 +467,10 @@ public class Http2Connection {
 
     private Cipher createCipher() {
         String cipherName = url.getParameter("cipher", "aes-gcm");
-        Cipher cipher = ExtensionLoader.getLoader(Cipher.class).getExtension(cipherName);
+        Cipher cipher = ExtensionLoader.getLoader(Cipher.class).newExtension(cipherName);
         String key = url.getParameter("cipherKey", "");
         if (!key.isEmpty()) {
-            cipher.init(new CipherConfig(key.getBytes()));
+            cipher.init(new CipherConfig(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         } else {
             cipher.init(new CipherConfig());
         }

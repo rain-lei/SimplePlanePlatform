@@ -4,6 +4,8 @@ transport: http2
 bizThreads: 200
 workerThreads: 0
 bossThreads: 1
+# 迁移时两端一起改为 chacha20-poly1305-v2 或 aes-gcm-v2，并使用恰好32字节随机密钥。
+# 旧 chacha20 有安全缺陷；保留此配置仅防止现有客户端被单端升级中断。
 cipher: chacha20
 cipherKey: your-cipher-key
 maxStreams: 1000

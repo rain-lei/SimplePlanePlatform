@@ -2,6 +2,8 @@
 
 桌面安装包用户请先阅读 [桌面端使用说明与故障排查](docs/桌面端使用说明与故障排查.md)。
 
+加密层新增 `chacha20-poly1305-v2` 与 `aes-gcm-v2`：使用标准 AEAD、认证记录头、HKDF 派生密钥及独立 stream 状态。两端必须选择同名套件，v2 的共享密钥须恰为 32 字节；保留原有 `Cipher` SPI 和传输分帧。旧 `chacha20` 存在密钥流重叠风险，仅为迁移保留兼容实现，不能把它视为标准 ChaCha20-Poly1305。配置、迁移边界和测试方法见 [加密 v2 规范](docs/design/crypto-v2.md) 与 [验证报告](docs/design/crypto-v2-validation.md)。
+
 ## HTTP/3 / QUIC 传输
 
 项目支持基于 Netty QUIC 的 HTTP/3 传输模式。配置远程节点时将 `transport` 设置为 `http3`，即可使用 UDP/QUIC 建立加密隧道；每个逻辑 `streamId` 映射到独立的 HTTP/3 Stream，以避免 TCP 单连接级别的队头阻塞。
@@ -101,7 +103,7 @@ SimplePlanePlatform/
 ├── proxy-common            SPI 内核：接口定义、ExtensionLoader、注解体系、数据模型
 ├── proxy-exchange          交换层：请求-响应语义（RequestId + Future 映射）
 ├── proxy-transport-netty   传输层：Netty HTTP/2 多路复用、编解码、心跳
-├── proxy-crypto            加密层：4 种可插拔 AEAD 加密实现
+├── proxy-crypto            加密层：版本化 AEAD 套件及旧协议兼容实现
 ├── proxy-cluster           集群层：4 种容错策略 + 4 种负载均衡 + 6 个 Filter
 ├── proxy-local             本地客户端：SOCKS5/HTTP CONNECT 双协议、路由分流、系统代理
 ├── proxy-remote            远程服务端：请求分发、出站连接管理、nginx 部署脚本

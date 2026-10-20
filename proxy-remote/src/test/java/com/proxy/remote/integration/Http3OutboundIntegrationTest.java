@@ -37,6 +37,8 @@ import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.Writer;
@@ -62,8 +64,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Verifies the real HTTP/3 remote outbound path, not just a mock ExchangeHandler. */
 class Http3OutboundIntegrationTest {
-    @Test
-    void forwardsDataToOutboundTcpTargetAndPushesResponseBackAfterConnect() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
+    void forwardsDataToOutboundTcpTargetAndPushesResponseBackAfterConnect(String suite) throws Exception {
         TestCertificates certificates = TestCertificates.create();
         EventLoopGroup targetBoss = new NioEventLoopGroup(1);
         EventLoopGroup targetWorkers = new NioEventLoopGroup(1);
@@ -102,7 +105,8 @@ class Http3OutboundIntegrationTest {
             }
             URL serverUrl = new URL("proxy", "localhost", http3Port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.certificateFile", certificates.certificate.getAbsolutePath())
                     .addParameter("http3.privateKeyFile", certificates.privateKey.getAbsolutePath());
             proxyServer = new Http3Server(serverUrl, new ExchangeHandler(dispatch));
@@ -111,7 +115,8 @@ class Http3OutboundIntegrationTest {
             ExtensionLoader.resetAll();
             URL clientUrl = new URL("proxy", "localhost", http3Port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.caFile", certificates.ca.getAbsolutePath());
             proxyClient = new HeaderExchanger().connect(clientUrl);
             java.util.concurrent.ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry =
@@ -127,7 +132,8 @@ class Http3OutboundIntegrationTest {
                     .build(), 5000).get(10, TimeUnit.SECONDS);
             assertTrue(connect.isSuccess(), "CONNECT should establish outbound TCP session");
 
-            byte[] payload = "http3-outbound-payload".getBytes(StandardCharsets.UTF_8);
+            byte[] payload = new byte[2 * 1024 * 1024 + 1];
+            new java.util.Random(8439).nextBytes(payload);
             BlockingQueue<byte[]> pushQueue = new LinkedBlockingQueue<>();
             EmbeddedChannel pushCapture = createPushCapture(streamId, pushQueue, streamRegistry);
             proxyClient.send(ProxyMessage.builder()
@@ -138,8 +144,14 @@ class Http3OutboundIntegrationTest {
                     .data(payload)
                     .build());
 
-            byte[] pushed = pushQueue.poll(5, TimeUnit.SECONDS);
-            assertArrayEquals(payload, pushed,
+            java.io.ByteArrayOutputStream received = new java.io.ByteArrayOutputStream();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (received.size() < payload.length && System.nanoTime() < deadline) {
+                pushCapture.runPendingTasks();
+                byte[] part = pushQueue.poll(100, TimeUnit.MILLISECONDS);
+                if (part != null) received.write(part);
+            }
+            assertArrayEquals(payload, received.toByteArray(),
                     "outbound TCP response should be pushed back over HTTP/3");
             pushCapture.finishAndReleaseAll();
         } finally {

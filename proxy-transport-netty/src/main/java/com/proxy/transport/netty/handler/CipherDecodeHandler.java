@@ -41,6 +41,7 @@ public class CipherDecodeHandler extends MessageToMessageDecoder<Http2DataFrame>
 
     /** 长度前缀字节数 */
     private static final int LENGTH_FIELD_LENGTH = 4;
+    private static final int MAX_CIPHERTEXT_LENGTH = 8 * 1024 * 1024 + 65536;
 
     private final Cipher cipher;
 
@@ -51,7 +52,7 @@ public class CipherDecodeHandler extends MessageToMessageDecoder<Http2DataFrame>
      * 默认构造 —— 通过 SPI 加载默认 Cipher 实现
      */
     public CipherDecodeHandler() {
-        this.cipher = ExtensionLoader.getLoader(Cipher.class).getDefaultExtension();
+        this.cipher = ExtensionLoader.getLoader(Cipher.class).newDefaultExtension();
     }
 
     /**
@@ -80,7 +81,7 @@ public class CipherDecodeHandler extends MessageToMessageDecoder<Http2DataFrame>
             while (cumulation != null && cumulation.readableBytes() >= LENGTH_FIELD_LENGTH) {
                 // 先读 4 字节长度（不前移读指针，长度不够时需要回退等待）
                 int ctLen = cumulation.getInt(cumulation.readerIndex());
-                if (ctLen < 0) {
+                if (ctLen < 0 || ctLen > MAX_CIPHERTEXT_LENGTH) {
                     // 异常长度，视为协议错误
                     log.error("CipherDecode: invalid ciphertext length {}, closing channel", ctLen);
                     ctx.close();
@@ -120,6 +121,9 @@ public class CipherDecodeHandler extends MessageToMessageDecoder<Http2DataFrame>
 
             // 处理 endStream：HTTP/2 的 endStream 标志必须传递给下游以正常结束流。
             // 用一个空 DATA 帧携带 endStream（下游 Codec 能识别 0 长度 + endStream）。
+            if (endStream && cumulation != null && cumulation.isReadable()) {
+                throw new CryptoException("Truncated ciphertext at end of stream");
+            }
             if (endStream) {
                 out.add(new DefaultHttp2DataFrame(Unpooled.EMPTY_BUFFER, true));
             }

@@ -47,6 +47,7 @@ pub struct DispatcherConfig {
     pub server_port: u16,
     /// 共享密钥（构造 [`Cipher`]；非 32 字节会按 Java 规则 SHA-256 派生）。
     pub key: Vec<u8>,
+    pub cipher: String,
     /// 是否启用 TLS（MVP 仅支持 false=h2c）。
     pub tls: bool,
 }
@@ -189,7 +190,7 @@ where
 
     tcp.set_nodelay(true).ok();
 
-    let cipher = Cipher::new(&config.key)?;
+    let cipher = Cipher::from_name(&config.cipher, &config.key)?;
     let outbound_cfg = OutboundConfig {
         server_host: config.server_host.clone(),
         server_port: config.server_port,
@@ -241,6 +242,7 @@ mod tests {
             server_host: "1.2.3.4".to_string(),
             server_port: 8443,
             key: b"unit-test-key-please-change-1234".to_vec(),
+            cipher: "chacha20".to_owned(),
             tls: true,
         };
         let prot = Arc::new(crate::outbound::NoopProtector);

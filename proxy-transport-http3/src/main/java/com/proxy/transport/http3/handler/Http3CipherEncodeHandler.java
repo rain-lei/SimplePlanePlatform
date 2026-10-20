@@ -17,7 +17,7 @@ public final class Http3CipherEncodeHandler extends MessageToMessageEncoder<Http
     private final int maxCiphertextBytes;
 
     public Http3CipherEncodeHandler() {
-        this(ExtensionLoader.getLoader(Cipher.class).getDefaultExtension(), 8 * 1024 * 1024 + 4096);
+        this(ExtensionLoader.getLoader(Cipher.class).newDefaultExtension(), 8 * 1024 * 1024 + 4096);
     }
 
     public Http3CipherEncodeHandler(Cipher cipher, int maxCiphertextBytes) {

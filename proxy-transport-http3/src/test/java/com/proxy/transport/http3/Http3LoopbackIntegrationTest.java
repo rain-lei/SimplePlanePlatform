@@ -18,6 +18,8 @@ import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.Writer;
@@ -44,8 +46,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Native QUIC/TLS loopback smoke test. */
 class Http3LoopbackIntegrationTest {
-    @Test
-    void clientAndServerExchangeProxyMessageOverUdp() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
+    void clientAndServerExchangeProxyMessageOverUdp(String suite) throws Exception {
         TestCertificates certificate = TestCertificates.create();
         Http3Server server = null;
         Http3Client client = null;
@@ -59,7 +62,8 @@ class Http3LoopbackIntegrationTest {
 
             URL serverUrl = new URL("proxy", "localhost", port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.certificateFile", certificate.certificate().getAbsolutePath())
                     .addParameter("http3.privateKeyFile", certificate.privateKey().getAbsolutePath());
             server = new Http3Server(serverUrl, serverHandler);
@@ -67,7 +71,8 @@ class Http3LoopbackIntegrationTest {
 
             URL clientUrl = new URL("proxy", "localhost", port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.caFile", certificate.ca().getAbsolutePath());
             client = new Http3Client(clientUrl, clientHandler);
             client.send(ProxyMessage.builder()
@@ -99,8 +104,9 @@ class Http3LoopbackIntegrationTest {
      * and exercises the important HTTP/3 property without depending on an
      * operating-system-specific packet-loss tool.</p>
      */
-    @Test
-    void delayedStreamDoesNotBlockIndependentStreams() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
+    void delayedStreamDoesNotBlockIndependentStreams(String suite) throws Exception {
         TestCertificates certificate = TestCertificates.create();
         DelayedStreamHandler serverHandler = new DelayedStreamHandler(1000L, 3, TimeUnit.SECONDS);
         StreamCapturingHandler clientHandler = new StreamCapturingHandler(1000L, 50);
@@ -113,7 +119,8 @@ class Http3LoopbackIntegrationTest {
         try {
             URL serverUrl = new URL("proxy", "localhost", port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.certificateFile", certificate.certificate().getAbsolutePath())
                     .addParameter("http3.privateKeyFile", certificate.privateKey().getAbsolutePath());
             server = new Http3Server(serverUrl, serverHandler);
@@ -121,7 +128,8 @@ class Http3LoopbackIntegrationTest {
 
             URL clientUrl = new URL("proxy", "localhost", port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.caFile", certificate.ca().getAbsolutePath());
             client = new Http3Client(clientUrl, clientHandler);
 

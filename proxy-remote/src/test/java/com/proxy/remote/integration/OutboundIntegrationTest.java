@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * </p>
  */
 class OutboundIntegrationTest {
+    String cipherSuite() { return "none"; }
 
     private static final String HOST = "127.0.0.1";
     private static final long TIMEOUT = 5000;
@@ -74,14 +75,16 @@ class OutboundIntegrationTest {
         serverUrl.addParameter("maxStreams", 100);
         serverUrl.addParameter("readIdleTimeout", 60);
         serverUrl.addParameter("backlog", 128);
-        serverUrl.addParameter("cipher", "none");
+        serverUrl.addParameter("cipher", cipherSuite());
+        serverUrl.addParameter("cipherKey", "0123456789abcdef0123456789abcdef");
 
         Exchanger exchanger = ExtensionLoader.getLoader(Exchanger.class).getDefaultExtension();
         proxyServer = exchanger.bind(serverUrl, dispatchInvoker);
 
         // 创建客户端连接到 Proxy
         URL clientUrl = new URL("proxy", HOST, proxyPort);
-        clientUrl.addParameter("cipher", "none");
+        clientUrl.addParameter("cipher", cipherSuite());
+        clientUrl.addParameter("cipherKey", "0123456789abcdef0123456789abcdef");
         proxyClient = exchanger.connect(clientUrl);
 
         // 注入 streamRegistry 用于接收推送
