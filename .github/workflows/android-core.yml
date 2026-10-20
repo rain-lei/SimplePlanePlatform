@@ -120,6 +120,9 @@ jobs:
 
       - name: 安装 Android SDK / 命令行工具
         uses: android-actions/setup-android@v3
+        with:
+          # The obsolete "tools" package is no longer available in the SDK repository.
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
       - name: 安装 Android NDK r26（cargo-ndk 交叉编译需要）
         run: |
