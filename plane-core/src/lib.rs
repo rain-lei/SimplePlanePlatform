@@ -26,6 +26,8 @@
 
 pub mod android_tun;
 pub mod crypto;
+#[cfg(test)]
+mod crypto_interop_tests;
 pub mod dispatcher;
 pub mod error;
 pub mod jni_bridge;

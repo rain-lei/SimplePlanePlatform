@@ -10,6 +10,8 @@ import com.proxy.exchange.header.HeaderExchanger;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.DatagramSocket;
 import java.nio.charset.StandardCharsets;
@@ -24,8 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Exercises the real exchange layer across a control request followed by DATA. */
 class Http3ExchangeIntegrationTest {
-    @Test
-    void exchangeHandlerAcceptsDataAfterConnectOnTheSameHttp3Stream() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
+    void exchangeHandlerAcceptsDataAfterConnectOnTheSameHttp3Stream(String suite) throws Exception {
         Http3LoopbackIntegrationTest.TestCertificates certificate =
                 Http3LoopbackIntegrationTest.TestCertificates.create();
         Http3Server server = null;
@@ -50,7 +53,8 @@ class Http3ExchangeIntegrationTest {
         try {
             URL serverUrl = new URL("proxy", "localhost", port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.certificateFile", certificate.certificate().getAbsolutePath())
                     .addParameter("http3.privateKeyFile", certificate.privateKey().getAbsolutePath());
             server = new Http3Server(serverUrl, new ExchangeHandler(invoker));
@@ -58,7 +62,8 @@ class Http3ExchangeIntegrationTest {
 
             URL clientUrl = new URL("proxy", "localhost", port)
                     .addParameter("transport", "http3")
-                    .addParameter("cipher", "none")
+                    .addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.caFile", certificate.ca().getAbsolutePath());
             client = new HeaderExchanger().connect(clientUrl);
 

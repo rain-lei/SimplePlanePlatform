@@ -2,6 +2,7 @@ package com.proxy.crypto;
 
 import com.proxy.common.crypto.CipherConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -54,6 +55,7 @@ public class CryptoVectorGenTest {
     }
 
     @Test
+    @EnabledIfSystemProperty(named = "crypto.generateLegacyVectors", matches = "true")
     public void generateCrossLanguageVectors() throws IOException {
         List<Vector> vectors = new ArrayList<>();
 

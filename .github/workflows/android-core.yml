@@ -22,6 +22,13 @@ on:
       - "plane-core/**"
       - "android-app/**"
       - "scripts/build-rust.sh"
+      - "scripts/crypto/**"
+      - "docs/design/crypto*vector*"
+      - "proxy-crypto/**"
+      - "proxy-common/**"
+      - "proxy-transport-netty/**"
+      - "proxy-transport-http3/**"
+      - "proxy-remote/**"
       - ".github/workflows/android-core.yml"
   pull_request:
     branches: [main, master]
@@ -29,6 +36,13 @@ on:
       - "plane-core/**"
       - "android-app/**"
       - "scripts/build-rust.sh"
+      - "scripts/crypto/**"
+      - "docs/design/crypto*vector*"
+      - "proxy-crypto/**"
+      - "proxy-common/**"
+      - "proxy-transport-netty/**"
+      - "proxy-transport-http3/**"
+      - "proxy-remote/**"
       - ".github/workflows/android-core.yml"
 
 # 同一分支/PR 的新提交自动取消上一次未完成的运行，省资源。
@@ -192,10 +206,26 @@ jobs:
   #              完成后，把下方 `if: false` 去掉并补全步骤，达成 Q3 三 job 全绿门禁。
   # ---------------------------------------------------------------------------
   interop:
-    name: 协议互通（A5/Q2 落地后启用）
+    name: 加密协议互通（Java / Rust / 真实服务）
     runs-on: ubuntu-latest
-    if: false
     steps:
       - uses: actions/checkout@v4
-      - name: 占位
-        run: echo "interop job 待 A5 出站层与 Q2 互通 harness 完成后启用"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plane-core
+      - name: Java / HTTP2 / HTTP3 回归并打包真实服务端
+        run: mvn -B -pl proxy-remote -am package '-Dtest=!BaiduProxyTest' -Dsurefire.failIfNoSpecifiedTests=false
+      - name: Java / Rust 大载荷、多 stream、拒绝降级与旧格式兼容
+        run: bash scripts/crypto/run-local-interop.sh
+      - name: 保存测试日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-interop-logs
+          path: .build/crypto-validation/run.*/**/*.log

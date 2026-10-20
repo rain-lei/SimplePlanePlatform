@@ -228,10 +228,11 @@ public class NettyServer implements Server {
      * 根据名称创建并初始化 Cipher 实例
      */
     private Cipher createCipher(String cipherName) {
-        Cipher cipher = ExtensionLoader.getLoader(Cipher.class).getExtension(cipherName);
+        Cipher cipher = ExtensionLoader.getLoader(Cipher.class).newExtension(cipherName);
         String key = url.getParameter("cipherKey", "");
         if (!key.isEmpty()) {
-            CipherConfig config = new CipherConfig(key.getBytes());
+            CipherConfig config = new CipherConfig(key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            config.setServerSide(true);
             cipher.init(config);
         } else {
             // NoneCipher 等不需要密钥的实现，也需要初始化

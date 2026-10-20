@@ -23,8 +23,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class Http3CodecHandlerTest {
+    @Test
+    void rejectsTruncatedRecordAtInputShutdown() {
+        EmbeddedChannel inbound = inboundChannel();
+        try {
+            inbound.writeInbound(new DefaultHttp3DataFrame(Unpooled.buffer(6).writeInt(100).writeShort(0)));
+            inbound.pipeline().fireUserEventTriggered(io.netty.channel.socket.ChannelInputShutdownEvent.INSTANCE);
+            assertFalse(inbound.isActive());
+            assertNull(inbound.readInbound());
+        } finally { inbound.finishAndReleaseAll(); }
+    }
     @Test
     void decodesOneMessageSplitAcrossDataFrames() {
         ProxyMessage message = message(7, ProxyMessage.MessageType.DATA, "split".getBytes(StandardCharsets.UTF_8));

@@ -153,7 +153,8 @@ public class URL {
             boolean first = true;
             for (Map.Entry<String, String> entry : parameters.entrySet()) {
                 if (!first) sb.append("&");
-                sb.append(entry.getKey()).append("=").append(entry.getValue());
+                sb.append(entry.getKey()).append("=")
+                        .append("cipherKey".equals(entry.getKey()) ? "[REDACTED]" : entry.getValue());
                 first = false;
             }
         }

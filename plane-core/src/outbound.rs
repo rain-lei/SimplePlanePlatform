@@ -164,6 +164,12 @@ impl InboundReassembler {
                 u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
                     as usize;
 
+            if ct_len > 8 * 1024 * 1024 + 65536 {
+                return Err(CoreError::Protocol(
+                    "Ciphertext length exceeds limit".to_owned(),
+                ));
+            }
+
             if self.cipher_buffer.len() - offset < CIPHER_LENGTH_PREFIX + ct_len {
                 // 本密文块还没收齐，等下一帧。
                 break;
@@ -278,6 +284,7 @@ impl OutboundConnection {
     ///
     /// 返回 [`OutboundStream`]，后续用它收发该 stream 上的 [`ProxyMessage`]。
     pub async fn open_proxy_stream(&mut self, host: &str, port: u16) -> Result<OutboundStream> {
+        let cipher = self.cipher.fresh_session()?;
         // 等待连接就绪（h2 流控 / SETTINGS）。
         let mut send_request = self
             .send_request
@@ -300,8 +307,15 @@ impl OutboundConnection {
 
         // 首个 CONNECT 消息（加密 DATA 帧）。
         let request_id = self.req_id_gen.next_id();
-        let connect_msg = ProxyMessage::connect(request_id, host, port);
-        let frame = encode_encrypted_frame(&self.cipher, &connect_msg)?;
+        let stream_id = loop {
+            let id = rand::random::<i64>() & i64::MAX;
+            if id != 0 {
+                break id;
+            }
+        };
+        let mut connect_msg = ProxyMessage::connect(request_id, host, port);
+        connect_msg.stream_id = stream_id;
+        let frame = encode_encrypted_frame(&cipher, &connect_msg)?;
         send_stream
             .send_data(Bytes::from(frame), false)
             .map_err(|e| CoreError::Protocol(format!("send CONNECT data failed: {e}")))?;
@@ -314,10 +328,11 @@ impl OutboundConnection {
 
         Ok(OutboundStream {
             request_id,
-            cipher: self.cipher.clone(),
+            stream_id,
+            cipher: cipher.clone(),
             send_stream,
             recv_stream,
-            reassembler: InboundReassembler::new(self.cipher.clone()),
+            reassembler: InboundReassembler::new(cipher),
         })
     }
 
@@ -333,6 +348,7 @@ impl OutboundConnection {
 /// 接收：h2 DATA 帧 → 解密 → 切包 → DATA `ProxyMessage` → 取出业务负载。
 pub struct OutboundStream {
     request_id: i64,
+    stream_id: i64,
     cipher: Cipher,
     send_stream: h2::SendStream<Bytes>,
     recv_stream: h2::RecvStream,
@@ -347,7 +363,9 @@ impl OutboundStream {
 
     /// 发送一段业务数据（包成 DATA 类型 ProxyMessage，加密为一个 h2 DATA 帧）。
     pub fn send_payload(&mut self, payload: &[u8]) -> Result<()> {
-        let msg = ProxyMessage::data(self.request_id, payload);
+        // DATA is fire-and-forget (requestId=0); streamId selects the outbound session.
+        let mut msg = ProxyMessage::data(0, payload);
+        msg.stream_id = self.stream_id;
         let frame = encode_encrypted_frame(&self.cipher, &msg)?;
         self.send_stream
             .send_data(Bytes::from(frame), false)
@@ -357,7 +375,8 @@ impl OutboundStream {
 
     /// 发送 DISCONNECT 并以 end_stream 关闭发送侧。
     pub fn send_disconnect(&mut self) -> Result<()> {
-        let msg = ProxyMessage::disconnect(self.request_id);
+        let mut msg = ProxyMessage::disconnect(self.request_id);
+        msg.stream_id = self.stream_id;
         let frame = encode_encrypted_frame(&self.cipher, &msg)?;
         self.send_stream
             .send_data(Bytes::from(frame), true)
@@ -379,7 +398,14 @@ impl OutboundStream {
                 Ok(Some(msgs))
             }
             Some(Err(e)) => Err(CoreError::Protocol(format!("h2 recv error: {e}"))),
-            None => Ok(None),
+            None => {
+                if self.reassembler.cipher_buffered_len() != 0
+                    || self.reassembler.buffered_len() != 0
+                {
+                    return Err(CoreError::Protocol("Truncated encrypted stream".to_owned()));
+                }
+                Ok(None)
+            }
         }
     }
 }

@@ -68,11 +68,11 @@ pub struct AndroidConfig {
     pub remote_port: u16,
 
     /// A6：与 proxy-remote 共享的密钥（构造 ChaCha20-Poly1305 Cipher）。
-    /// 非 32 字节会按 Java 规则 SHA-256 派生。缺省为空串（无法真正出站，仅供占位/测试）。
+    /// v2 必须恰为 32 字节；旧 chacha20 保留 SHA-256 规整规则。
     #[serde(default)]
     pub remote_key: String,
 
-    /// A6：cipher 名称，默认 "chacha20"（当前仅支持 chacha20，与 ChaCha20Cipher 兼容）。
+    /// 支持 chacha20-poly1305-v2 / aes-gcm-v2；默认 chacha20 仅用于旧服务迁移兼容。
     #[serde(default = "default_cipher")]
     pub cipher: String,
 
@@ -340,6 +340,7 @@ fn spawn_data_plane(
         server_host: config.remote_host.clone(),
         server_port: config.remote_port,
         key: config.remote_key.clone().into_bytes(),
+        cipher: config.cipher.clone(),
         tls: config.tls,
     };
     let protector = std::sync::Arc::new(JniProtector {

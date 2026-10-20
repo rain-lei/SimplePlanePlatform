@@ -142,9 +142,11 @@ public final class Http3Server implements Server {
 
     private Cipher createCipher() {
         Cipher cipher = ExtensionLoader.getLoader(Cipher.class)
-                .getExtension(url.getParameter("cipher", "none"));
+                .newExtension(url.getParameter("cipher", "none"));
         String key = url.getParameter("cipherKey", "");
-        cipher.init(key.isEmpty() ? new CipherConfig() : new CipherConfig(key.getBytes()));
+        CipherConfig config = new CipherConfig(key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        config.setServerSide(true);
+        cipher.init(config);
         return cipher;
     }
 

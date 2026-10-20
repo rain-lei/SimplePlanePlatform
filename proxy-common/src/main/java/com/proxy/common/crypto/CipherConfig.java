@@ -8,6 +8,16 @@ public class CipherConfig {
     private byte[] key;
     private byte[] iv;
     private String algorithm;
+    private boolean serverSide;
+
+    /** Endpoint role for direction-separated suites; legacy suites ignore it. */
+    public boolean isServerSide() {
+        return serverSide;
+    }
+
+    public void setServerSide(boolean serverSide) {
+        this.serverSide = serverSide;
+    }
 
     public CipherConfig() {
     }

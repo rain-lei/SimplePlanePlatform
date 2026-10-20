@@ -17,7 +17,7 @@ public final class Http3CipherDecodeHandler extends ChannelInboundHandlerAdapter
     private ByteBuf cumulation;
 
     public Http3CipherDecodeHandler() {
-        this(ExtensionLoader.getLoader(Cipher.class).getDefaultExtension(), 8 * 1024 * 1024 + 4096);
+        this(ExtensionLoader.getLoader(Cipher.class).newDefaultExtension(), 8 * 1024 * 1024 + 4096);
     }
 
     public Http3CipherDecodeHandler(Cipher cipher, int maxCiphertextBytes) {
@@ -79,6 +79,17 @@ public final class Http3CipherDecodeHandler extends ChannelInboundHandlerAdapter
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         releaseCumulation();
         super.channelInactive(ctx);
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
+        if (event instanceof io.netty.channel.socket.ChannelInputShutdownEvent
+                && cumulation != null && cumulation.isReadable()) {
+            releaseCumulation();
+            ctx.close(); // A FIN may not silently turn a partial record into a successful stream.
+            return;
+        }
+        super.userEventTriggered(ctx, event);
     }
 
     private void releaseCumulation() {
