@@ -58,10 +58,25 @@ public class OutboundConnector {
                     }
                 });
 
-        bootstrap.connect(host, port).addListener((ChannelFutureListener) cf -> {
+        ChannelFuture connecting = bootstrap.connect(host, port);
+        ChannelFutureListener cancelOnInboundClose = ignored -> future.cancel(false);
+        session.getInboundCtx().channel().closeFuture().addListener(cancelOnInboundClose);
+        future.whenComplete((channel, error) -> {
+            session.getInboundCtx().channel().closeFuture().removeListener(cancelOnInboundClose);
+            if (future.isCancelled()) {
+                connecting.cancel(false);
+                connecting.channel().close();
+            }
+        });
+        connecting.addListener((ChannelFutureListener) cf -> {
             if (cf.isSuccess()) {
                 log.debug("Outbound connected: target={}:{}, sessionKey={}", host, port, session.getSessionKey());
-                future.complete(cf.channel());
+                if (session.getState() == OutboundSession.SessionState.CLOSED
+                        || !session.getInboundCtx().channel().isActive()
+                        || !future.complete(cf.channel())) {
+                    cf.channel().close();
+                    future.completeExceptionally(new java.nio.channels.ClosedChannelException());
+                }
             } else {
                 log.warn("Outbound connect failed: target={}:{}, sessionKey={}", host, port, session.getSessionKey(), cf.cause());
                 future.completeExceptionally(cf.cause());

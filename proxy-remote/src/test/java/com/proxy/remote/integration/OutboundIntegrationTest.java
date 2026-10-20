@@ -230,16 +230,31 @@ class OutboundIntegrationTest {
         proxyClient.request(connectMsg, TIMEOUT).get(TIMEOUT, TimeUnit.MILLISECONDS);
         Thread.sleep(200);
 
-        // 关闭 echo server 的 worker group → 强制断开所有已建立连接
-        echoServerWorkerGroup.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS).sync();
-        Thread.sleep(500);
-
-        // 验证目标关闭后服务端 session 已进入 CLOSED 状态
         OutboundSession session =
                 dispatchInvoker.getSessionManager().get(String.valueOf(streamId));
-        assertNotNull(session, "Session entry should still exist before next DATA cleanup");
-        assertEquals(OutboundSession.SessionState.CLOSED, session.getState(),
-                "Session should be CLOSED after target server closes");
+        assertNotNull(session, "CONNECT must have registered a session");
+        EmbeddedChannel browser = createPushCapture(streamId, new LinkedBlockingQueue<>());
+        try {
+            // Target EOF must clean the registry and both sides, without another DATA frame.
+            echoServerWorkerGroup.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS).sync();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while ((browser.isActive() || session.getInboundCtx().channel().isActive()
+                    || proxyClient.getClient().getActiveStreamCount() != 0)
+                    && System.nanoTime() < deadline) {
+                browser.runPendingTasks();
+                Thread.sleep(10);
+            }
+            assertEquals(OutboundSession.SessionState.CLOSED, session.getState());
+            assertNull(dispatchInvoker.getSessionManager().get(String.valueOf(streamId)),
+                    "Closed session must be removed immediately");
+            assertFalse(session.getOutboundChannel().isActive());
+            assertFalse(session.getInboundCtx().channel().isActive());
+            assertFalse(browser.isActive(), "Target EOF must reach the browser");
+            assertFalse(streamRegistry.containsKey(streamId));
+            assertEquals(0, proxyClient.getClient().getActiveStreamCount());
+        } finally {
+            browser.finishAndReleaseAll();
+        }
     }
 
     /**

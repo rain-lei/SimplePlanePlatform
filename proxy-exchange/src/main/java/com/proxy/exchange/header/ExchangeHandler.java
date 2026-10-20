@@ -64,6 +64,30 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
      * </p>
      */
     private volatile ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry;
+    private static final AttributeKey<Long> STREAM_ID = AttributeKey.valueOf("proxy.logical.streamId");
+    private final ConcurrentHashMap<Long, PendingRequest> pendingRequests = new ConcurrentHashMap<>();
+
+    private static final class PendingRequest {
+        final long streamId;
+        final DefaultFuture future;
+        PendingRequest(long streamId, DefaultFuture future) {
+            this.streamId = streamId;
+            this.future = future;
+        }
+    }
+
+    void trackRequest(long requestId, long streamId, DefaultFuture future, boolean cancelWithBrowser) {
+        PendingRequest pending = new PendingRequest(streamId, future);
+        pendingRequests.put(requestId, pending);
+        future.whenComplete((response, error) -> pendingRequests.remove(requestId, pending));
+        ChannelHandlerContext browser = streamRegistry != null ? streamRegistry.get(streamId) : null;
+        if (cancelWithBrowser && browser != null) {
+            io.netty.channel.ChannelFutureListener cancel = ignored ->
+                    future.completeExceptionally(new java.nio.channels.ClosedChannelException());
+            browser.channel().closeFuture().addListener(cancel);
+            future.whenComplete((response, error) -> browser.channel().closeFuture().removeListener(cancel));
+        }
+    }
 
     // ==================== 构造器 ====================
 
@@ -91,6 +115,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
             log.warn("Received null message or null type, ignoring");
             return;
         }
+        if (message.getStreamId() != 0) ctx.channel().attr(STREAM_ID).set(message.getStreamId());
 
         // 读取并清除 Channel Attribute 中的 FlowPermit（ProxyMessageDecoder 在 fireChannelRead 前写入）
         // 背压关闭或客户端 pipeline 无 BackpressureHandler 时 attr 为 null → 使用 NOOP
@@ -162,13 +187,21 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
             }
             ProxyMessage reply = ProxyMessage.builder()
                     .requestId(message.getRequestId())
+                    .streamId(message.getStreamId())
                     .type(ProxyMessage.MessageType.CONNECT_RESPONSE)
                     .status(response.getStatus())
                     .message(response.getErrorMessage())
                     .data(response.getData())
                     .build();
             if (ctx.channel().isActive()) {
-                ctx.writeAndFlush(reply);
+                io.netty.channel.ChannelFuture write = ctx.writeAndFlush(reply);
+                if (message.getType() == ProxyMessage.MessageType.DISCONNECT
+                        || (message.getType() == ProxyMessage.MessageType.CONNECT && !response.isSuccess())) {
+                    write.addListener(done -> {
+                        if (done.isSuccess()) finishOutput(ctx);
+                        else ctx.close();
+                    });
+                }
             }
         });
     }
@@ -266,12 +299,14 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        Long streamId = ctx.channel().attr(STREAM_ID).get();
+        if (invoker == null && streamId != null) {
+            onStreamClosed(streamId, new java.nio.channels.ClosedChannelException());
+        }
         if (invoker != null) {
             log.debug("Server stream channel inactive: {}", ctx.channel());
         } else {
-            // 单个 HTTP/2 stream 关闭是正常行为（session 结束），
-            // 不应该 failAll 影响其他 stream 的 pending 请求。
-            // 只有底层 HTTP/2 connection 断开时才需要 failAll（由 onDisconnected() 负责）。
+            // A stream only fails its own requests; parent disconnect fails this client's requests.
             log.debug("Client stream channel inactive: {}", ctx.channel());
         }
         super.channelInactive(ctx);
@@ -281,7 +316,8 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         log.error("Exception in stream channel: {}", ctx.channel(), cause);
         if (invoker == null) {
-            DefaultFuture.failAll(cause);
+            Long streamId = ctx.channel().attr(STREAM_ID).get();
+            if (streamId != null) onStreamClosed(streamId, cause);
         }
         ctx.close();
     }
@@ -308,7 +344,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     public void onError(Throwable cause) {
         log.error("Connection error reported", cause);
         if (invoker == null) {
-            DefaultFuture.failAll(cause);
+            failPending(cause);
         }
     }
 
@@ -316,7 +352,23 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     public void onDisconnected() {
         log.warn("Connection disconnected reported");
         if (invoker == null) {
-            DefaultFuture.failAll(new RuntimeException("Connection disconnected"));
+            failPending(new RuntimeException("Connection disconnected"));
+        }
+    }
+
+    private void failPending(Throwable cause) {
+        for (PendingRequest pending : pendingRequests.values()) pending.future.completeExceptionally(cause);
+    }
+
+    @Override
+    public void onStreamClosed(long streamId, Throwable cause) {
+        Throwable failure = cause != null ? cause : new java.nio.channels.ClosedChannelException();
+        for (PendingRequest pending : pendingRequests.values()) {
+            if (pending.streamId == streamId) pending.future.completeExceptionally(failure);
+        }
+        if (streamRegistry != null) {
+            ChannelHandlerContext browser = streamRegistry.remove(streamId);
+            if (browser != null) browser.close();
         }
     }
 
@@ -351,7 +403,20 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
                     .status(Response.ERROR)
                     .message(errorMessage != null ? errorMessage : "Internal server error")
                     .build();
-            ctx.writeAndFlush(reply);
+            ctx.writeAndFlush(reply).addListener(done -> {
+                if (done.isSuccess()) finishOutput(ctx);
+                else ctx.close();
+            });
+        }
+    }
+
+    private static void finishOutput(ChannelHandlerContext ctx) {
+        if (ctx.channel() instanceof io.netty.channel.socket.DuplexChannel) {
+            ((io.netty.channel.socket.DuplexChannel) ctx.channel()).shutdownOutput().addListener(done -> {
+                if (!done.isSuccess()) ctx.close();
+            });
+        } else {
+            ctx.close();
         }
     }
 }

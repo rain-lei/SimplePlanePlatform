@@ -77,7 +77,7 @@ class Http3LoopbackIntegrationTest {
             client = new Http3Client(clientUrl, clientHandler);
             client.send(ProxyMessage.builder()
                     .streamId(42)
-                    .type(ProxyMessage.MessageType.DATA)
+                    .type(ProxyMessage.MessageType.CONNECT)
                     .data("quic-loopback".getBytes(StandardCharsets.UTF_8))
                     .build());
 
@@ -135,7 +135,7 @@ class Http3LoopbackIntegrationTest {
 
             client.send(ProxyMessage.builder()
                     .streamId(1000L)
-                    .type(ProxyMessage.MessageType.DATA)
+                    .type(ProxyMessage.MessageType.CONNECT)
                     .data("slow-stream".getBytes(StandardCharsets.UTF_8))
                     .build());
             assertTrue(serverHandler.slowStreamObserved.await(5, TimeUnit.SECONDS),
@@ -145,7 +145,7 @@ class Http3LoopbackIntegrationTest {
             for (int i = 0; i < 50; i++) {
                 client.send(ProxyMessage.builder()
                         .streamId(2000L + i)
-                        .type(ProxyMessage.MessageType.DATA)
+                        .type(ProxyMessage.MessageType.CONNECT)
                         .data(("fast-stream-" + i).getBytes(StandardCharsets.UTF_8))
                         .build());
             }

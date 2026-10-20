@@ -150,21 +150,23 @@ public class DispatchInvoker implements Invoker {
         String sessionKey = (String) invocation.getAttachment("streamId");
         long rawStreamId = (Long) invocation.getAttachment("rawStreamId");
         ChannelHandlerContext inboundCtx = (ChannelHandlerContext) invocation.getAttachment("inboundCtx");
+        if (!inboundCtx.channel().isActive()) return Response.error("Inbound stream already closed");
 
         // 创建出站会话（sessionKey 用于 SessionManager 查找，rawStreamId 用于回写消息）
         OutboundSession session = new OutboundSession(inboundCtx, targetHost, targetPort, sessionKey, rawStreamId);
         sessionManager.register(sessionKey, session);
 
         // 同步等待出站连接建立（在 bizExecutor 线程中阻塞，不影响 IO 线程）
+        CompletableFuture<Channel> connecting = connector.connect(targetHost, targetPort, session);
         try {
-            Channel channel = connector.connect(targetHost, targetPort, session)
-                    .get(activeWaitTimeoutMs, TimeUnit.MILLISECONDS);
-            session.setOutboundChannel(channel);
+            Channel channel = connecting.get(activeWaitTimeoutMs, TimeUnit.MILLISECONDS);
+            if (!session.setOutboundChannel(channel)) return Response.error("Stream closed during CONNECT");
             log.info("CONNECT success: target={}:{}, sessionKey={}", targetHost, targetPort, sessionKey);
             return Response.ok();
         } catch (Exception e) {
+            connecting.cancel(true);
             log.error("CONNECT failed: target={}:{}, sessionKey={}", targetHost, targetPort, sessionKey, e);
-            sessionManager.remove(sessionKey);
+            sessionManager.remove(sessionKey, session);
             return Response.error("Connect to " + targetHost + ":" + targetPort + " failed: " + e.getMessage());
         }
     }
