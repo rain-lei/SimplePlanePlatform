@@ -64,6 +64,173 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Verifies the real HTTP/3 remote outbound path, not just a mock ExchangeHandler. */
 class Http3OutboundIntegrationTest {
+    /** Opt-in diagnosis: exercise stream credit recycling on one real QUIC connection. */
+    @ParameterizedTest
+    @ValueSource(strings = {"disconnect", "transport-close", "target-close", "connect-rejected", "connect-timeout",
+            "disconnect-peer-close", "transport-reset"})
+    @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "http3.lifecycle.probe", matches = "true")
+    void streamCreditsMustBeRecycledWithSequentialConnections(String mode) throws Exception {
+        String selectedMode = System.getProperty("http3.lifecycle.mode", "all");
+        org.junit.jupiter.api.Assumptions.assumeTrue("all".equals(selectedMode)
+                || java.util.Arrays.asList(selectedMode.split(",")).contains(mode));
+        int limit = Integer.getInteger("http3.lifecycle.limit", 32);
+        int cycles = Integer.getInteger("http3.lifecycle.cycles", limit * 5);
+        String suite = System.getProperty("http3.lifecycle.cipher", "none");
+        TestCertificates certificates = TestCertificates.create();
+        EventLoopGroup workers = new NioEventLoopGroup(1);
+        io.netty.channel.group.ChannelGroup targets = new io.netty.channel.group.DefaultChannelGroup(
+                io.netty.util.concurrent.GlobalEventExecutor.INSTANCE);
+        java.util.Set<Channel> serverStreams = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        java.util.concurrent.atomic.AtomicInteger targetActive = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger targetPeak = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger backendConnects = new java.util.concurrent.atomic.AtomicInteger();
+        Channel target = null;
+        Http3Server server = null;
+        ExchangeClient client = null;
+        DispatchInvoker dispatch = null;
+        int completed = 0;
+        Throwable stopped = null;
+        try {
+            target = new ServerBootstrap().group(workers).channel(NioServerSocketChannel.class)
+                    .childHandler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel channel) {
+                            targets.add(channel);
+                            channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                                @Override
+                                public void channelActive(ChannelHandlerContext ctx) {
+                                    targetPeak.accumulateAndGet(targetActive.incrementAndGet(), Math::max);
+                                    if ("target-close".equals(mode)) ctx.close();
+                                }
+
+                                @Override
+                                public void channelInactive(ChannelHandlerContext ctx) {
+                                    targetActive.decrementAndGet();
+                                }
+                            });
+                        }
+                    }).bind("127.0.0.1", 0).sync().channel();
+            int targetPort = ((java.net.InetSocketAddress) target.localAddress()).getPort();
+            if ("connect-rejected".equals(mode)) {
+                target.close().sync();
+            }
+            dispatch = new DispatchInvoker(java.util.concurrent.Executors.newFixedThreadPool(2),
+                    new OutboundConnector(workers, 500), 500);
+            final DispatchInvoker actualDispatch = dispatch;
+            com.proxy.common.filter.Invoker backend = invocation -> {
+                if (invocation.getType() == ProxyMessage.MessageType.CONNECT) backendConnects.incrementAndGet();
+                if ("connect-timeout".equals(mode)
+                        && invocation.getType() == ProxyMessage.MessageType.CONNECT) {
+                    return new CompletableFuture<>();
+                }
+                return actualDispatch.invoke(invocation);
+            };
+            int port;
+            try (DatagramSocket socket = new DatagramSocket(0)) { port = socket.getLocalPort(); }
+            URL serverUrl = new URL("proxy", "localhost", port)
+                    .addParameter("transport", "http3").addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
+                    .addParameter("http3.maxStreamsPerConnection", String.valueOf(limit))
+                    .addParameter("http3.certificateFile", certificates.certificate.getAbsolutePath())
+                    .addParameter("http3.privateKeyFile", certificates.privateKey.getAbsolutePath());
+            server = new Http3Server(serverUrl, new ExchangeHandler(backend) {
+                @Override
+                public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+                    serverStreams.add(ctx.channel());
+                    ctx.channel().closeFuture().addListener(f -> serverStreams.remove(ctx.channel()));
+                    super.handlerAdded(ctx);
+                }
+
+                @Override
+                public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
+                    if ("disconnect-peer-close".equals(mode)
+                            && event instanceof io.netty.channel.socket.ChannelInputShutdownEvent) {
+                        ctx.close();
+                    }
+                    super.userEventTriggered(ctx, event);
+                }
+            });
+            server.start();
+            client = new HeaderExchanger().connect(new URL("proxy", "localhost", port)
+                    .addParameter("transport", "http3").addParameter("cipher", suite)
+                    .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
+                    .addParameter("http3.caFile", certificates.ca.getAbsolutePath()));
+            for (int index = 0; index < cycles; index++) {
+                long id = 100_000L + index;
+                try {
+                    Response response = null;
+                    try {
+                        response = client.request(ProxyMessage.builder().type(ProxyMessage.MessageType.CONNECT)
+                                .streamId(id).host("127.0.0.1").port(targetPort).build(),
+                                "connect-timeout".equals(mode) ? 100 : 1500).get(3, TimeUnit.SECONDS);
+                    } catch (java.util.concurrent.ExecutionException expectedTimeout) {
+                        if (!"connect-timeout".equals(mode)) throw expectedTimeout;
+                    }
+                    org.junit.jupiter.api.Assertions.assertTrue(backendConnects.get() > index,
+                            "CONNECT never reached server; local timeout must not count as a successful cycle");
+                    if (!"connect-timeout".equals(mode)) {
+                        org.junit.jupiter.api.Assertions.assertNotNull(response);
+                        org.junit.jupiter.api.Assertions.assertEquals(!"connect-rejected".equals(mode),
+                                response.isSuccess());
+                    }
+                    if ("disconnect".equals(mode) || "disconnect-peer-close".equals(mode)) {
+                        client.request(ProxyMessage.builder().type(ProxyMessage.MessageType.DISCONNECT)
+                                .streamId(id).host("127.0.0.1").port(targetPort).build(), 1500)
+                                .get(3, TimeUnit.SECONDS);
+                    } else if ("transport-close".equals(mode)) {
+                        client.getClient().closeStream(id);
+                    } else if ("transport-reset".equals(mode)) {
+                        java.lang.reflect.Field statesField = client.getClient().getClass().getDeclaredField("streams");
+                        statesField.setAccessible(true);
+                        Object state = ((java.util.Map<?, ?>) statesField.get(client.getClient())).get(id);
+                        java.lang.reflect.Field channelField = state.getClass().getDeclaredField("channel");
+                        channelField.setAccessible(true);
+                        io.netty.handler.codec.quic.QuicStreamChannel stream =
+                                (io.netty.handler.codec.quic.QuicStreamChannel) channelField.get(state);
+                        stream.shutdown(0).sync();
+                        stream.close().sync();
+                    }
+                    // Allow close/MAX_STREAMS frames to reach the peer; do not build a burst.
+                    Thread.sleep(10);
+                    completed++;
+                } catch (Throwable failure) {
+                    stopped = failure;
+                    break;
+                }
+            }
+            // Optional observation across the existing ten-second server cleanup scan.
+            Thread.sleep(Long.getLong("http3.lifecycle.settleMs", 0L));
+            java.lang.reflect.Field sessionsField = DispatchInvoker.class.getDeclaredField("sessionManager");
+            sessionsField.setAccessible(true);
+            com.proxy.remote.outbound.SessionManager sessions =
+                    (com.proxy.remote.outbound.SessionManager) sessionsField.get(dispatch);
+            java.lang.reflect.Field connectionField = client.getClient().getClass().getDeclaredField("connection");
+            connectionField.setAccessible(true);
+            io.netty.handler.codec.quic.QuicChannel quic =
+                    ((com.proxy.transport.http3.Http3Connection) connectionField.get(client.getClient())).channel();
+            long credit = quic.eventLoop().submit(() -> quic.peerAllowedStreams(
+                    io.netty.handler.codec.quic.QuicStreamType.BIDIRECTIONAL)).get(3, TimeUnit.SECONDS);
+            System.out.printf("LIFECYCLE mode=%s cipher=%s limit=%d planned=%d completed=%d clientStreams=%d "
+                            + "serverStreams=%d serverSessions=%d targetActive=%d targetPeak=%d "
+                            + "backendConnects=%d peerCredit=%d stopped=%s%n",
+                    mode, suite, limit, cycles, completed, client.getClient().getActiveStreamCount(),
+                    serverStreams.size(), sessions.activeCount(), targetActive.get(), targetPeak.get(),
+                    backendConnects.get(), credit,
+                    stopped == null ? "none" : stopped.toString());
+            org.junit.jupiter.api.Assertions.assertEquals(cycles, completed,
+                    "Sequential connections exhausted QUIC stream credit: " + mode);
+            org.junit.jupiter.api.Assertions.assertNull(stopped, "Lifecycle stopped: " + mode);
+        } finally {
+            if (client != null) client.close();
+            if (server != null) server.close();
+            if (dispatch != null) dispatch.shutdown();
+            if (target != null) target.close();
+            targets.close().awaitUninterruptibly();
+            workers.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly();
+            certificates.delete();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
     void forwardsDataToOutboundTcpTargetAndPushesResponseBackAfterConnect(String suite) throws Exception {
