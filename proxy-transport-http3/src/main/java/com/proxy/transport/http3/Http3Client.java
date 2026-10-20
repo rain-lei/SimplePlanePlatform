@@ -75,6 +75,9 @@ public final class Http3Client implements Client {
         long streamId = message.getStreamId();
         Http3StreamState state = streams.get(streamId);
         if (state == null) {
+            if (message.getType() != ProxyMessage.MessageType.CONNECT) {
+                throw new IllegalStateException("No open HTTP/3 stream for " + streamId);
+            }
             Http3StreamState candidate = new Http3StreamState(streamId);
             Http3StreamState existing = streams.putIfAbsent(streamId, candidate);
             state = existing != null ? existing : openStream(candidate);
@@ -108,8 +111,19 @@ public final class Http3Client implements Client {
             @Override
             protected void initChannel(QuicStreamChannel channel) {
                 Cipher cipher = createCipher(url);
-                state.channel = channel;
-                state.phase = Http3StreamState.Phase.WAITING_RESPONSE;
+                synchronized (state) {
+                    if (closed.get() || streams.get(state.streamId) != state
+                            || state.phase == Http3StreamState.Phase.CLOSED
+                            || state.phase == Http3StreamState.Phase.FAILED) {
+                        channel.shutdown(io.netty.handler.codec.http3.Http3ErrorCode.H3_REQUEST_CANCELLED.code())
+                                .addListener(ignored -> channel.close());
+                        return;
+                    }
+                    state.channel = channel;
+                    state.phase = Http3StreamState.Phase.WAITING_RESPONSE;
+                }
+                channel.attr(io.netty.util.AttributeKey.<Long>valueOf("proxy.logical.streamId"))
+                        .set(state.streamId);
                 channel.config().setOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
                         new WriteBufferWaterMark(
                                 url.getParameter("http3.writeBufferLowWaterMark", 262144),
@@ -181,25 +195,31 @@ public final class Http3Client implements Client {
     }
 
     private void closeState(Http3StreamState state) {
+        boolean notify;
         synchronized (state) {
+            notify = state.phase != Http3StreamState.Phase.CLOSED && state.phase != Http3StreamState.Phase.FAILED;
             if (state.phase != Http3StreamState.Phase.FAILED) {
                 state.phase = Http3StreamState.Phase.CLOSED;
             }
             releasePending(state);
         }
         streams.remove(state.streamId, state);
+        if (notify) messageHandler.onStreamClosed(state.streamId, null);
     }
 
     private void failStream(Http3StreamState state, Throwable cause) {
         synchronized (state) {
+            if (state.phase == Http3StreamState.Phase.FAILED || state.phase == Http3StreamState.Phase.CLOSED) return;
             state.phase = Http3StreamState.Phase.FAILED;
             releasePending(state);
         }
         streams.remove(state.streamId, state);
         QuicStreamChannel channel = state.channel;
         if (channel != null && channel.isActive()) {
-            channel.close();
+            channel.shutdown(io.netty.handler.codec.http3.Http3ErrorCode.H3_REQUEST_CANCELLED.code())
+                    .addListener(ignored -> channel.close());
         }
+        messageHandler.onStreamClosed(state.streamId, cause);
         log.warn("HTTP/3 stream {} failed locally: {}", state.streamId,
                 cause != null ? cause.getMessage() : "unknown");
     }

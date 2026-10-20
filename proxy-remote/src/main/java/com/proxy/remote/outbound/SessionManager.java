@@ -4,9 +4,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import io.netty.util.HashedWheelTimer;
 
 /**
  * 会话映射管理器
@@ -24,16 +24,38 @@ public class SessionManager {
     /**
      * 定期扫描清理不活跃 session 的调度器
      */
-    private final ScheduledExecutorService cleanupScheduler;
+    private final HashedWheelTimer cleanupTimer;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final long cleanupIntervalMs;
 
     public SessionManager() {
-        // 每 10 秒扫描一次，清理 inboundCtx 已不活跃的 session
-        cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        this(10000);
+    }
+
+    SessionManager(long cleanupIntervalMs) {
+        this.cleanupIntervalMs = Math.max(100, cleanupIntervalMs);
+        cleanupTimer = new HashedWheelTimer(r -> {
             Thread t = new Thread(r, "session-cleanup");
             t.setDaemon(true);
             return t;
-        });
-        cleanupScheduler.scheduleAtFixedRate(this::cleanupInactiveSessions, 10, 10, TimeUnit.SECONDS);
+        }, 100, TimeUnit.MILLISECONDS, 512);
+        scheduleCleanup();
+    }
+
+    private void scheduleCleanup() {
+        if (closed.get()) return;
+        try {
+            cleanupTimer.newTimeout(timeout -> {
+                if (closed.get()) return;
+                try {
+                    cleanupInactiveSessions();
+                } finally {
+                    if (!closed.get()) scheduleCleanup();
+                }
+            }, cleanupIntervalMs, TimeUnit.MILLISECONDS);
+        } catch (IllegalStateException stopped) {
+            if (!closed.get()) throw stopped;
+        }
     }
 
     /**
@@ -43,11 +65,19 @@ public class SessionManager {
      * @param session  出站会话
      */
     public void register(String streamId, OutboundSession session) {
+        if (closed.get()) {
+            session.close();
+            return;
+        }
+        session.setCloseListener(() -> sessions.remove(streamId, session));
         OutboundSession prev = sessions.put(streamId, session);
         if (prev != null) {
             log.warn("Replacing existing session for streamId={}, closing old session", streamId);
             prev.close();
         }
+        session.getInboundCtx().channel().closeFuture().addListener(f -> remove(streamId, session));
+        if (closed.get() || !session.getInboundCtx().channel().isActive()
+                || session.getState() == OutboundSession.SessionState.CLOSED) remove(streamId, session);
         log.debug("Session registered: streamId={}, target={}:{}", streamId, session.getTargetHost(), session.getTargetPort());
     }
 
@@ -77,6 +107,10 @@ public class SessionManager {
         return session;
     }
 
+    public void remove(String streamId, OutboundSession expected) {
+        if (sessions.remove(streamId, expected)) expected.close();
+    }
+
     /**
      * 当前活跃会话数（监控用）
      */
@@ -95,12 +129,17 @@ public class SessionManager {
         int cleaned = 0;
         for (java.util.Map.Entry<String, OutboundSession> entry : sessions.entrySet()) {
             OutboundSession session = entry.getValue();
-            if (!session.getInboundCtx().channel().isActive()) {
+            if (session.getState() == OutboundSession.SessionState.CLOSED
+                    || !session.getInboundCtx().channel().isActive()) {
                 sessions.remove(entry.getKey(), session);
                 session.close();
                 cleaned++;
                 log.info("Cleanup: closed inactive session, sessionKey={}, target={}:{}",
                         entry.getKey(), session.getTargetHost(), session.getTargetPort());
+            } else if (session.getState() == OutboundSession.SessionState.ACTIVE
+                    && session.getOutboundChannel() != null && !session.getOutboundChannel().isActive()) {
+                session.closeFromTarget();
+                cleaned++;
             }
         }
         if (cleaned > 0) {
@@ -112,7 +151,8 @@ public class SessionManager {
      * 关闭所有会话（服务关闭时调用）
      */
     public void closeAll() {
-        cleanupScheduler.shutdownNow();
+        if (!closed.compareAndSet(false, true)) return;
+        cleanupTimer.stop();
         int count = sessions.size();
         sessions.forEach((streamId, session) -> {
             try {

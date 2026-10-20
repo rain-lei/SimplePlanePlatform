@@ -25,4 +25,8 @@ public interface MessageHandler {
      * 连接断开时回调
      */
     void onDisconnected();
+
+    /** A single logical stream ended; other streams on the connection remain usable. */
+    default void onStreamClosed(long streamId, Throwable cause) {
+    }
 }

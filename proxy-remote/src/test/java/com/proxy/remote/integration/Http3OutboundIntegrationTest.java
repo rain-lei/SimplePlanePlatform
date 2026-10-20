@@ -67,7 +67,7 @@ class Http3OutboundIntegrationTest {
     /** Opt-in diagnosis: exercise stream credit recycling on one real QUIC connection. */
     @ParameterizedTest
     @ValueSource(strings = {"disconnect", "transport-close", "target-close", "connect-rejected", "connect-timeout",
-            "disconnect-peer-close", "transport-reset"})
+            "disconnect-peer-close", "transport-reset", "transport-close-guard", "healthy-idle", "cancel-opening"})
     @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "http3.lifecycle.probe", matches = "true")
     void streamCreditsMustBeRecycledWithSequentialConnections(String mode) throws Exception {
         String selectedMode = System.getProperty("http3.lifecycle.mode", "all");
@@ -100,6 +100,11 @@ class Http3OutboundIntegrationTest {
                                 @Override
                                 public void channelActive(ChannelHandlerContext ctx) {
                                     targetPeak.accumulateAndGet(targetActive.incrementAndGet(), Math::max);
+                                }
+
+                                @Override
+                                public void channelRead(ChannelHandlerContext ctx, Object message) {
+                                    io.netty.util.ReferenceCountUtil.release(message);
                                     if ("target-close".equals(mode)) ctx.close();
                                 }
 
@@ -131,11 +136,22 @@ class Http3OutboundIntegrationTest {
                     .addParameter("transport", "http3").addParameter("cipher", suite)
                     .addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
                     .addParameter("http3.maxStreamsPerConnection", String.valueOf(limit))
+                    .addParameter("http3.streamCleanupIntervalMs", "100")
                     .addParameter("http3.certificateFile", certificates.certificate.getAbsolutePath())
                     .addParameter("http3.privateKeyFile", certificates.privateKey.getAbsolutePath());
             server = new Http3Server(serverUrl, new ExchangeHandler(backend) {
                 @Override
                 public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+                    if ("transport-close-guard".equals(mode)) {
+                        ctx.pipeline().addBefore("h3-stream", "drop-fin-event", new ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void userEventTriggered(ChannelHandlerContext context, Object event) throws Exception {
+                                if (!(event instanceof io.netty.channel.socket.ChannelInputShutdownEvent)) {
+                                    super.userEventTriggered(context, event);
+                                }
+                            }
+                        });
+                    }
                     serverStreams.add(ctx.channel());
                     ctx.channel().closeFuture().addListener(f -> serverStreams.remove(ctx.channel()));
                     super.handlerAdded(ctx);
@@ -160,26 +176,40 @@ class Http3OutboundIntegrationTest {
                 try {
                     Response response = null;
                     try {
-                        response = client.request(ProxyMessage.builder().type(ProxyMessage.MessageType.CONNECT)
+                        CompletableFuture<Response> connecting = client.request(ProxyMessage.builder().type(ProxyMessage.MessageType.CONNECT)
                                 .streamId(id).host("127.0.0.1").port(targetPort).build(),
-                                "connect-timeout".equals(mode) ? 100 : 1500).get(3, TimeUnit.SECONDS);
+                                "connect-timeout".equals(mode) ? 100 : 1500);
+                        if ("cancel-opening".equals(mode)) client.getClient().closeStream(id);
+                        response = connecting.get(3, TimeUnit.SECONDS);
                     } catch (java.util.concurrent.ExecutionException expectedTimeout) {
-                        if (!"connect-timeout".equals(mode)) throw expectedTimeout;
+                        if (!"connect-timeout".equals(mode) && !"cancel-opening".equals(mode)) throw expectedTimeout;
                     }
-                    org.junit.jupiter.api.Assertions.assertTrue(backendConnects.get() > index,
-                            "CONNECT never reached server; local timeout must not count as a successful cycle");
-                    if (!"connect-timeout".equals(mode)) {
+                    if (!"cancel-opening".equals(mode)) {
+                        org.junit.jupiter.api.Assertions.assertTrue(backendConnects.get() > index,
+                                "CONNECT never reached server; local timeout must not count as a successful cycle");
+                    }
+                    if (!"connect-timeout".equals(mode) && !"cancel-opening".equals(mode)) {
                         org.junit.jupiter.api.Assertions.assertNotNull(response);
                         org.junit.jupiter.api.Assertions.assertEquals(!"connect-rejected".equals(mode),
                                 response.isSuccess());
                     }
-                    if ("disconnect".equals(mode) || "disconnect-peer-close".equals(mode)) {
+                    if ("target-close".equals(mode)) {
+                        client.send(ProxyMessage.builder().type(ProxyMessage.MessageType.DATA).streamId(id)
+                                .host("127.0.0.1").port(targetPort).data(new byte[]{1}).build());
+                    } else if ("healthy-idle".equals(mode)) {
+                        Thread.sleep(350);
+                        org.junit.jupiter.api.Assertions.assertEquals(1, client.getClient().getActiveStreamCount(),
+                                "Cleanup must preserve idle streams that have not ended either direction");
+                        client.request(ProxyMessage.builder().type(ProxyMessage.MessageType.DISCONNECT)
+                                .streamId(id).host("127.0.0.1").port(targetPort).build(), 1500)
+                                .get(3, TimeUnit.SECONDS);
+                    } else if ("disconnect".equals(mode) || "disconnect-peer-close".equals(mode)) {
                         client.request(ProxyMessage.builder().type(ProxyMessage.MessageType.DISCONNECT)
                                 .streamId(id).host("127.0.0.1").port(targetPort).build(), 1500)
                                 .get(3, TimeUnit.SECONDS);
                     } else if ("transport-close".equals(mode)) {
                         client.getClient().closeStream(id);
-                    } else if ("transport-reset".equals(mode)) {
+                    } else if ("transport-reset".equals(mode) || "transport-close-guard".equals(mode)) {
                         java.lang.reflect.Field statesField = client.getClient().getClass().getDeclaredField("streams");
                         statesField.setAccessible(true);
                         Object state = ((java.util.Map<?, ?>) statesField.get(client.getClient())).get(id);
@@ -187,11 +217,20 @@ class Http3OutboundIntegrationTest {
                         channelField.setAccessible(true);
                         io.netty.handler.codec.quic.QuicStreamChannel stream =
                                 (io.netty.handler.codec.quic.QuicStreamChannel) channelField.get(state);
-                        stream.shutdown(0).sync();
-                        stream.close().sync();
+                        if ("transport-close-guard".equals(mode)) {
+                            // Drop server FIN notification above: only its wheel can close output.
+                            stream.shutdownOutput().sync();
+                        } else {
+                            stream.shutdown(0).sync();
+                            stream.close().sync();
+                        }
                     }
                     // Allow close/MAX_STREAMS frames to reach the peer; do not build a burst.
                     Thread.sleep(10);
+                    long closeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                    while (!serverStreams.isEmpty() && System.nanoTime() < closeDeadline) Thread.sleep(5);
+                    org.junit.jupiter.api.Assertions.assertTrue(serverStreams.isEmpty(),
+                            "Server stream did not close after a terminal event");
                     completed++;
                 } catch (Throwable failure) {
                     stopped = failure;
@@ -220,6 +259,12 @@ class Http3OutboundIntegrationTest {
             org.junit.jupiter.api.Assertions.assertEquals(cycles, completed,
                     "Sequential connections exhausted QUIC stream credit: " + mode);
             org.junit.jupiter.api.Assertions.assertNull(stopped, "Lifecycle stopped: " + mode);
+            org.junit.jupiter.api.Assertions.assertEquals(0, client.getClient().getActiveStreamCount());
+            org.junit.jupiter.api.Assertions.assertEquals(0, serverStreams.size());
+            org.junit.jupiter.api.Assertions.assertEquals(0, sessions.activeCount());
+            long targetDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (targetActive.get() != 0 && System.nanoTime() < targetDeadline) Thread.sleep(5);
+            org.junit.jupiter.api.Assertions.assertEquals(0, targetActive.get());
         } finally {
             if (client != null) client.close();
             if (server != null) server.close();
@@ -229,6 +274,11 @@ class Http3OutboundIntegrationTest {
             workers.shutdownGracefully(0, 1, TimeUnit.SECONDS).awaitUninterruptibly();
             certificates.delete();
         }
+    }
+
+    @Test
+    void normalDisconnectRecyclesCreditBeyondInitialLimit() throws Exception {
+        streamCreditsMustBeRecycledWithSequentialConnections("disconnect");
     }
 
     @ParameterizedTest
@@ -250,11 +300,17 @@ class Http3OutboundIntegrationTest {
                         @Override
                         protected void initChannel(SocketChannel channel) {
                             channel.pipeline().addLast(new SimpleChannelInboundHandler<ByteBuf>() {
+                                private int received;
                                 @Override
                                 protected void channelRead0(ChannelHandlerContext ctx, ByteBuf message) {
                                     // Force the response through OutboundSession.writeBack
-                                    // and the real HTTP/3 client push path.
-                                    ctx.writeAndFlush(message.retain());
+                                    // and close immediately after the last echo: EOF must not
+                                    // truncate the final DATA record on the QUIC stream.
+                                    received += message.readableBytes();
+                                    io.netty.channel.ChannelFuture write = ctx.writeAndFlush(message.retain());
+                                    if (received == 2 * 1024 * 1024 + 1) {
+                                        write.addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+                                    }
                                 }
                             });
                         }
