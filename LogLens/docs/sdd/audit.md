@@ -25,7 +25,7 @@
 | R19 | Strict configuration failure and normal port shutdown; web bind failure after plugin/storage startup closes plugin and releases full session directory; storage-directory startup failure closes the assembled plugin, preserves the original IOException with node-close failure suppressed, and releases the plugin JAR; stuck-plugin deadline yields incomplete metadata and deferred cleanup after consumer return | Failure injection at remaining runtime startup phases and forced process kill |
 | R20 | Output failure health fallback, plugin exception, captured-index insert failure, processed tags transaction abort after JSONL append with rollback/rebuild, slow-client queues, DROP/BLOCK saturation, blocked publisher exit, accepted batch drain, and stuck-plugin timeout/incomplete/deferred cleanup verified | Persistent failures at other disk/index stages, slow-disk behavior and forced-kill cleanup |
 | R21 | 模块/API/Agent/viewer/Boot/SPI/README；release 脚本生成并检查 Agent/Viewer/API 三个公开 JAR | 版本化归档/签名等发布流程（第一版未要求） |
-| R22 | 固定种子三模式 100k、同主机三次测量调用时延、吞吐、进程 CPU、GC、采样堆、磁盘、丢弃和输出回退；记录显著波动 | 控制 JIT/系统负载、更多硬件与 Java 版本；基于稳定实测制定并复核性能目标 |
+| R22 | 固定种子三模式 100k、原始三轮 DROP_NEWEST 结果、2026-10-20 默认策略复测及三轮 BLOCK 零丢弃对照；记录调用时延、吞吐、进程 CPU、GC、采样堆、磁盘、丢弃和输出回退，详见[性能报告](../../../docs/loglens-performance-report.md)与[验证记录](verification.md) | 控制 JIT/系统负载、补齐硬件规格、增加硬件与 Java 版本样本、稳态和并发场景；基于稳定实测制定并复核性能目标 |
 | R23 | 没有 Attach/热加载/远程中心实现 | 最终源码与文档交叉检查 |
 | R24 | IDEA 脚本 E 盘 cache/tmp/user，实际使用 | 所有验证命令持续核对 C 盘无写入 |
 

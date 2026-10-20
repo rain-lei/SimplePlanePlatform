@@ -23,6 +23,9 @@ run = root / '.build/performance' / str(uuid.uuid4())
 run.mkdir(parents=True)
 results = []
 count = int(os.environ.get('LOGLENS_PERF_COUNT', '100000'))
+overflow_policy = os.environ.get('LOGLENS_PERF_OVERFLOW_POLICY', 'DROP_NEWEST').upper()
+if overflow_policy not in ('DROP_NEWEST', 'BLOCK'):
+    raise SystemExit('LOGLENS_PERF_OVERFLOW_POLICY must be DROP_NEWEST or BLOCK')
 for mode in ('baseline', 'observe', 'replace-console'):
     case = run / mode
     case.mkdir()
@@ -44,7 +47,7 @@ capture:
   maxMessageChars: 16384
 runtime:
   ringBufferSize: 8192
-  overflowPolicy: DROP_NEWEST
+  overflowPolicy: {overflow_policy}
   shutdownTimeoutMillis: 30000
   tickMillis: 25
 web:
@@ -105,6 +108,6 @@ output:
                     'sessionComplete': complete})
 report = {'java': subprocess.run([str(java), '-version'], capture_output=True, text=True, encoding='utf-8', errors='replace').stderr.splitlines()[0],
           'os': platform.platform(), 'processor': platform.processor(), 'logicalProcessors': os.cpu_count(),
-          'seed': 20261012, 'count': count, 'cases': results}
+          'seed': 20261012, 'count': count, 'overflowPolicy': overflow_policy, 'cases': results}
 (run / 'results.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
 print(f'Performance modes verified: {run}')

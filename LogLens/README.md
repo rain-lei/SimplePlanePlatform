@@ -106,6 +106,7 @@ scratch 和导出文件应放在原会话目录外。Viewer 使用只读历史�
 ## 示例与验证
 
 - [Java/Spring Boot 与 SPI 示例](examples/README.md)
+- [性能测试与容量评估报告](../docs/loglens-performance-report.md)
 - [需求规格](docs/sdd/requirements.md)
 - [设计契约](docs/sdd/design.md)
 - [任务追踪](docs/sdd/tasks.md)

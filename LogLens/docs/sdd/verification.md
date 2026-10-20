@@ -296,9 +296,15 @@ Playwright 仅安装到 `.build/python-tools`，使用现有 Chrome，profile/tm
 
 replace-console 三次运行将 83,488–84,380 条未入队事件退回原 ConsoleAppender；三个模式的原 FileAppender 都完整。测试后端继续处理已接收队列，故 Agent 模式墙钟明显高于 Logger 调用循环时间。数据表明默认 8,192 槽位不适合此突发强度：高丢弃是实际测量结果，不能解读为无损性能。observe 吞吐约 2.9 倍波动、replace-console 约 2.8 倍波动，说明这台主机的实验受 JIT/系统调度/消费者排空时间影响，不能据此制定产品性能承诺。CPU/GC/堆为 JVM 管理接口采样，LogLens 会话数据不含单独列出的 SQLite native DLL。三组原始运行指标保存在 [performance-run-1.json](evidence/performance-run-1.json)、[performance-run-2.json](evidence/performance-run-2.json)、[performance-run-3.json](evidence/performance-run-3.json)；完整控制台和会话文件在 `.build/performance/` 对应 UUID 目录。还需控制 JIT 与系统负载、增加环境和 Java 版本样本；R22 未完成最终验收。
 
+## 2026-10-20 性能复测与 BLOCK 背压对照
+
+在同一 Windows 10/JBR 21.0.6 主机上再次执行固定种子三模式基准。默认 `DROP_NEWEST` 的本轮 `observe` 与 `replace-console` 分别调用约 114,440/s、41,678/s，但只捕获 8,663/14,846 条；应用 FileAppender 仍完整写入 100,000 行。随后以临时 `BLOCK` 配置独立重复三轮，两种 Agent 模式均采集 100,000 条、丢弃 0 条；有效调用速率约 6,873–8,100/s，最大单次调用延迟为约 0.66–2.06 秒。结果支持“有界队列的丢弃/背压取舍”，不构成长期稳态容量承诺。
+
+归档结果：[默认策略复测](evidence/performance-20261020-drop.json)、[BLOCK 第 1 轮](evidence/performance-20261020-block-1.json)、[第 2 轮](evidence/performance-20261020-block-2.json)、[第 3 轮](evidence/performance-20261020-block-3.json)。完整环境、数据解释、限制和复测计划见仓库 [LogLens 性能测试与容量评估报告](../../../docs/loglens-performance-report.md)。基准脚本现可通过 `LOGLENS_PERF_OVERFLOW_POLICY=DROP_NEWEST|BLOCK` 选择测试策略，并在结果 JSON 中记录该策略。
+
 ## MULTI Disruptor multi-producer and STOP drain
 
-Added `ProcessingRuntimeTest.multiProducerPublishesAreDrainedBeforeStop`: four real concurrent threads each publish 1,000 events with ringBufferSize=8192. All 4,000 were accepted and persisted in captured JSONL; STOP drained the queue and marked the session complete. Targeted JBR 21 run passed 2 tests with zero failures/errors/skips in 22.565 seconds. BLOCK saturation and shutdown with in-flight producers remain uncovered.
+Added `ProcessingRuntimeTest.multiProducerPublishesAreDrainedBeforeStop`: four real concurrent threads each publish 1,000 events with ringBufferSize=8192. All 4,000 were accepted and persisted in captured JSONL; STOP drained the queue and marked the session complete. Targeted JBR 21 run passed 2 tests with zero failures/errors/skips in 22.565 seconds. BLOCK saturation and shutdown with in-flight producers are covered in the dedicated test below.
 
 ## Full traversal of 100,000 historical records
 
