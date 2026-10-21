@@ -250,6 +250,7 @@ pub async fn start_proxy_local(state: &mut AppState) -> Result<(), String> {
     // 因此转换为 proxy-java.yml 单独给 Java 进程使用
     match config::write_java_config() {
         Ok(java_config_path) => {
+            let _ = std::fs::remove_file(config::get_config_dir().join("proxy-java.yml.status.json"));
             cmd.arg(java_config_path.to_str().unwrap_or_default());
             log::info!("Generated Java-compatible config: {:?}", java_config_path);
         }
@@ -454,6 +455,7 @@ pub async fn start_tun_adapter(state: &mut AppState) -> Result<(), String> {
         .push("info", "tun-adapter", "正在启动 TUN adapter...");
 
     // TUN 需要提权运行（macOS/Linux 需要 sudo）
+    let tun_config_path = config::write_tun_node_config()?;
     let child_result = start_tun_with_privilege(&tun_path, &tun_config_path);
 
     match child_result {

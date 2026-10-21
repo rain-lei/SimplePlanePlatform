@@ -3,3 +3,4 @@ failover=com.proxy.cluster.FailoverClusterInvoker
 failfast=com.proxy.cluster.FailfastClusterInvoker
 forking=com.proxy.cluster.ForkingClusterInvoker
 failback=com.proxy.cluster.FailbackClusterInvoker
+sticky=com.proxy.cluster.StickyClusterInvoker

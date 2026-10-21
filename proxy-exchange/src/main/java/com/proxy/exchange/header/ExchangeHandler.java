@@ -66,6 +66,14 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     private volatile ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry;
     private static final AttributeKey<Long> STREAM_ID = AttributeKey.valueOf("proxy.logical.streamId");
     private final ConcurrentHashMap<Long, PendingRequest> pendingRequests = new ConcurrentHashMap<>();
+    // CONNECT futures finish before established streams; retain stream ownership until closure.
+    private final java.util.Set<Long> ownedStreams = ConcurrentHashMap.newKeySet();
+    private java.util.function.LongConsumer streamClosedListener = ignored -> { };
+
+    public void setStreamClosedListener(java.util.function.LongConsumer listener) {
+        streamClosedListener = java.util.Objects.requireNonNull(listener);
+    }
+
 
     private static final class PendingRequest {
         final long streamId;
@@ -77,6 +85,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     }
 
     void trackRequest(long requestId, long streamId, DefaultFuture future, boolean cancelWithBrowser) {
+        if (cancelWithBrowser) ownedStreams.add(streamId);
         PendingRequest pending = new PendingRequest(streamId, future);
         pendingRequests.put(requestId, pending);
         future.whenComplete((response, error) -> pendingRequests.remove(requestId, pending));
@@ -290,8 +299,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
         // 如果是 DISCONNECT 类型，关闭浏览器连接并注销
         if (message.getType() == ProxyMessage.MessageType.DISCONNECT) {
             log.debug("Received DISCONNECT for streamId={}, closing browser channel", streamId);
-            browserCtx.close();
-            streamRegistry.remove(streamId);
+            onStreamClosed(streamId, null);
         }
     }
 
@@ -358,10 +366,12 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
 
     private void failPending(Throwable cause) {
         for (PendingRequest pending : pendingRequests.values()) pending.future.completeExceptionally(cause);
+        for (Long streamId : ownedStreams.toArray(new Long[0])) onStreamClosed(streamId, cause);
     }
 
     @Override
     public void onStreamClosed(long streamId, Throwable cause) {
+        boolean owned = ownedStreams.remove(streamId);
         Throwable failure = cause != null ? cause : new java.nio.channels.ClosedChannelException();
         for (PendingRequest pending : pendingRequests.values()) {
             if (pending.streamId == streamId) pending.future.completeExceptionally(failure);
@@ -370,6 +380,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
             ChannelHandlerContext browser = streamRegistry.remove(streamId);
             if (browser != null) browser.close();
         }
+        if (owned) streamClosedListener.accept(streamId);
     }
 
     // ==================== 工具方法 ====================

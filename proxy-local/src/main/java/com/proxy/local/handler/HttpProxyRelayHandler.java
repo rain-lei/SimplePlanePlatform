@@ -86,7 +86,7 @@ public class HttpProxyRelayHandler extends ChannelInboundHandlerAdapter {
         if (initialRequest != null && initialRequest.length > 0) {
             log.debug("Sending initial HTTP request for {}:{}, streamId={}, {} bytes",
                     targetHost, targetPort, streamId, initialRequest.length);
-            sendData(initialRequest);
+            sendData(ctx, initialRequest);
             initialRequest = null; // 释放引用，帮助 GC
         }
     }
@@ -113,7 +113,7 @@ public class HttpProxyRelayHandler extends ChannelInboundHandlerAdapter {
 
             byte[] data = new byte[buf.readableBytes()];
             buf.readBytes(data);
-            sendData(data);
+            sendData(ctx, data);
         } finally {
             buf.release();
         }
@@ -148,13 +148,14 @@ public class HttpProxyRelayHandler extends ChannelInboundHandlerAdapter {
      *
      * @param data 要发送的数据字节
      */
-    private void sendData(byte[] data) {
+    private void sendData(ChannelHandlerContext ctx, byte[] data) {
         Invocation invocation = new Invocation(targetHost, targetPort, data, ProxyMessage.MessageType.DATA);
         invocation.setAttachment("streamId", streamId);
         invoker.invoke(invocation).whenComplete((response, throwable) -> {
-            if (throwable != null) {
+            if (throwable != null || (response != null && !response.isSuccess())) {
                 log.error("HTTP proxy relay DATA failed for {}:{}, streamId={}",
                         targetHost, targetPort, streamId, throwable);
+                ctx.close();
             }
         });
     }

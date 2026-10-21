@@ -71,6 +71,7 @@ public class StreamChannelRegistry {
      */
     public void register(long streamId, ChannelHandlerContext ctx) {
         registry.put(streamId, ctx);
+        ctx.channel().closeFuture().addListener(ignored -> registry.remove(streamId, ctx));
         log.debug("Registered streamId={} → channel={}", streamId, ctx.channel().remoteAddress());
     }
 

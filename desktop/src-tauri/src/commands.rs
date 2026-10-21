@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 /// 状态响应结构
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
+    pub node_status: Option<serde_json::Value>,
     pub proxy_status: ServiceStatus,
     pub tun_status: ServiceStatus,
     pub proxy_mode: ProxyMode,
@@ -133,6 +134,9 @@ pub async fn status(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<Sta
     }
 
     Ok(StatusResponse {
+        node_status: if s.proxy_status == ServiceStatus::Running {
+            config::read_node_status()
+        } else { None },
         proxy_status: s.proxy_status.clone(),
         tun_status: s.tun_status.clone(),
         proxy_mode: s.proxy_mode.clone(),
@@ -151,13 +155,23 @@ pub async fn get_config() -> Result<config::ProxyConfig, String> {
 /// 保存代理配置
 #[tauri::command]
 pub async fn save_config(
-    config_data: config::ProxyConfig,
+    mut config_data: config::ProxyConfig,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<String, String> {
     // 更新运行时端口
     let mut s = state.lock().await;
-    s.proxy_port = config_data.local.port;
-    s.http_port = config_data.local.http_proxy_port;
+    config_data.normalize_nodes()?;
+    if s.tun_status == ServiceStatus::Running {
+        let previous = config::load_proxy_config()?;
+        let hosts = |c: &config::ProxyConfig| c.nodes.iter().map(|n| n.remote.host.clone()).collect::<std::collections::BTreeSet<_>>();
+        if hosts(&previous) != hosts(&config_data) {
+            return Err("节点地址列表变化需要重新配置 TUN 路由，请先断开连接再保存".into());
+        }
+    }
+    if s.proxy_status != ServiceStatus::Running {
+        s.proxy_port = config_data.local.port;
+        s.http_port = config_data.local.http_proxy_port;
+    }
     drop(s);
 
     config::save_proxy_config(&config_data)?;
@@ -248,19 +262,14 @@ pub async fn apply_preset(
         .ok_or_else(|| format!("Preset '{}' not found", name))?;
 
     // 保存预设中的配置为当前配置
-    let mut s = state.lock().await;
-    s.proxy_port = preset.config.local.port;
-    s.http_port = preset.config.local.http_proxy_port;
-    drop(s);
-
-    config::save_proxy_config(&preset.config)?;
+    save_config(preset.config.clone(), state).await?;
     Ok(format!("Preset '{}' applied", name))
 }
 
 /// 导入服务器配置（支持 YAML 格式）
 /// 前端传入 YAML 字符串，后端解析出服务器列表返回
 #[tauri::command]
-pub async fn import_servers(yaml_content: String) -> Result<Vec<config::RemoteConfig>, String> {
+pub async fn import_servers(yaml_content: String) -> Result<Vec<config::RemoteNode>, String> {
     config::parse_servers_from_yaml(&yaml_content)
 }
 
@@ -394,6 +403,8 @@ fn get_builtin_presets() -> Vec<Preset> {
             name: "办公模式".to_string(),
             description: "仅代理海外站点，国内直连。适合日常办公使用。".to_string(),
             config: config::ProxyConfig {
+                nodes: Vec::new(),
+                selected_node_id: String::new(),
                 local: config::LocalConfig {
                     port: 1080,
                     http_proxy_enabled: true,
@@ -426,6 +437,8 @@ fn get_builtin_presets() -> Vec<Preset> {
             name: "全局代理".to_string(),
             description: "所有流量通过代理。适合需要全局代理访问的场景。".to_string(),
             config: config::ProxyConfig {
+                nodes: Vec::new(),
+                selected_node_id: String::new(),
                 local: config::LocalConfig {
                     port: 1080,
                     http_proxy_enabled: true,
@@ -458,6 +471,8 @@ fn get_builtin_presets() -> Vec<Preset> {
             name: "开发调试".to_string(),
             description: "为开发者优化的配置，代理 GitHub/NPM/Docker 等开发资源。".to_string(),
             config: config::ProxyConfig {
+                nodes: Vec::new(),
+                selected_node_id: String::new(),
                 local: config::LocalConfig {
                     port: 7890,
                     http_proxy_enabled: true,

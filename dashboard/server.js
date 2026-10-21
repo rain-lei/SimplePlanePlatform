@@ -4,12 +4,14 @@ const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
 const { parseYaml, toYaml } = require('./yaml');
+const { validateManualNodes, atomicWrite, readNodeStatus, prepareTunNodeConfig } = require('./nodes');
 
 const PORT = process.env.DASHBOARD_PORT || 3000;
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const LOCAL_CONFIG = path.join(PROJECT_ROOT, 'proxy-local', 'src', 'main', 'resources', 'proxy.yml');
 const REMOTE_CONFIG = path.join(PROJECT_ROOT, 'proxy-remote', 'src', 'main', 'resources', 'remote.yml');
 const TUN_CONFIG = path.join(PROJECT_ROOT, 'tun-adapter', 'config', 'tun.toml');
+let activeTunConfig = TUN_CONFIG;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PRESETS_DIR = path.join(__dirname, 'presets');
 
@@ -127,7 +129,10 @@ function startProxyLocal() {
   const jar = getJarPath();
   if (!jar) return { ok: false, error: 'JAR not found. Click Build first.' };
 
-  const args = ['-jar', jar];
+  const args = ['-jar', jar, LOCAL_CONFIG];
+  try { fs.unlinkSync(`${LOCAL_CONFIG}.status.json`); } catch (error) {
+    if (error.code !== 'ENOENT') return { ok: false, error: '无法清理旧的节点运行状态' };
+  }
   const proc = spawn('java', args, { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], detached: false });
 
   processes['proxy-local'].proc = proc;
@@ -236,7 +241,7 @@ const TUN_LOG_FILE = path.join(__dirname, '.tun-adapter.log');
 const TUN_PID_FILE = path.join(__dirname, '.tun-adapter.pid');
 let tunLogTail = null;
 
-function startTunAdapter() {
+async function startTunAdapter() {
   // Check if already running (by PID file or by interface)
   if (isTunRunning()) {
     processes['tun-adapter'].status = 'running';
@@ -247,6 +252,11 @@ function startTunAdapter() {
 
   const bin = getTunBinaryPath();
   if (!bin) return { ok: false, error: 'Binary not found. Click Build first.' };
+  try {
+    const config = getConfig('local');
+    if (!config.ok) return config;
+    activeTunConfig = await prepareTunNodeConfig(config.data, TUN_CONFIG);
+  } catch (error) { return { ok: false, error: `节点直连豁免配置失败：${error.message}` }; }
 
   processes['tun-adapter'].status = 'starting';
   processes['tun-adapter'].startedAt = Date.now();
@@ -286,7 +296,7 @@ function startTunViaSudo(bin) {
 
   let proc;
   try {
-    proc = spawn('sudo', ['-n', bin, '-c', TUN_CONFIG], {
+    proc = spawn('sudo', ['-n', bin, '-c', activeTunConfig], {
       cwd: PROJECT_ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
@@ -415,7 +425,7 @@ function startTunWindows(bin) {
 
   let proc;
   try {
-    proc = spawn(bin, ['-c', TUN_CONFIG], {
+    proc = spawn(bin, ['-c', activeTunConfig], {
       cwd: PROJECT_ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
@@ -988,8 +998,16 @@ function getConfig(reqType) {
 function saveConfig(reqType, newData) {
   const filePath = reqType === 'remote' ? REMOTE_CONFIG : LOCAL_CONFIG;
   try {
+    if (reqType === 'local') validateManualNodes(newData);
+    if (reqType === 'local' && isTunRunning()) {
+      const previous = getConfig('local');
+      const hosts = config => [...new Set((config.remoteServers || []).map(node => node.host))].sort().join('\n');
+      if (previous.ok && hosts(previous.data) !== hosts(newData)) {
+        throw new Error('节点地址列表变化需要重新配置 TUN 路由，请先停止 TUN 再保存');
+      }
+    }
     const yamlText = toYaml(newData);
-    fs.writeFileSync(filePath, yamlText + '\n', 'utf-8');
+    atomicWrite(filePath, yamlText + '\n');
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
 }
@@ -1100,7 +1118,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/status') return json(res, 200, { ok: true, services: getStatusAll(), systemProxy: getSystemProxy(), platform: getPlatformInfo() });
   if (pathname === '/api/service/start' && req.method === 'POST') {
     const b = await parseBody(req); if (!b || !b.name) return json(res, 400, { error: 'missing name' });
-    const r = b.name === 'proxy-local' ? startProxyLocal() : b.name === 'tun-adapter' ? startTunAdapter() : { ok: false, error: 'unknown' };
+    const r = await (b.name === 'proxy-local' ? startProxyLocal() : b.name === 'tun-adapter' ? startTunAdapter() : { ok: false, error: 'unknown' });
     return json(res, r.ok ? 200 : 400, r);
   }
   if (pathname === '/api/service/stop' && req.method === 'POST') {
@@ -1130,7 +1148,7 @@ const server = http.createServer(async (req, res) => {
           if (!processes['tun-adapter'].proc || checks >= 25) { clearInterval(interval); resolve(); }
         }, 200);
       });
-      return json(res, 200, startTunAdapter());
+      return json(res, 200, await startTunAdapter());
     }
     return json(res, 400, { error: 'unknown' });
   }
@@ -1160,6 +1178,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- Config ---
+  if (pathname === '/api/nodes/status' && req.method === 'GET') return json(res, 200, readNodeStatus(LOCAL_CONFIG));
   if (pathname === '/api/config/local' && req.method === 'GET') { const c = getConfig('local'); return json(res, c.ok ? 200 : 500, c); }
   if (pathname === '/api/config/remote' && req.method === 'GET') { const c = getConfig('remote'); return json(res, c.ok ? 200 : 500, c); }
   if (pathname === '/api/config/local' && req.method === 'POST') {

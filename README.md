@@ -8,6 +8,8 @@
 
 项目支持基于 Netty QUIC 的 HTTP/3 传输模式。配置远程节点时将 `transport` 设置为 `http3`，即可使用 UDP/QUIC 建立加密隧道；每个逻辑 `streamId` 映射到独立的 HTTP/3 Stream，以避免 TCP 单连接级别的队头阻塞。
 
+HTTP/3 支持配置多个节点并手动切换：每条流固定具体连接，切换关闭旧节点的代理流；Web 与桌面端区分配置保存和运行时应用。配置、迁移边界与验收测试见 [HTTP/3 多节点手动切换（P1/P2）](docs/design/http3-node-selection-p1-p2.md)。自动故障切换留待 P3。
+
 需要注意：HTTP/3 Stream 解决的是跨 Stream 的有序交付阻塞，但同一条 QUIC 连接上的所有 Stream 仍共享连接级拥塞窗口、流量控制额度和发送缓冲区。因此丢包或大流量 Stream 仍可能影响其他 Stream 的吞吐，跨流公平调度目前列为后续优化项。
 
 相关设计文档：

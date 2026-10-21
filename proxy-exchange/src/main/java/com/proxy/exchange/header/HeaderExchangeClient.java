@@ -123,6 +123,11 @@ public class HeaderExchangeClient implements ExchangeClient {
     }
 
     @Override
+    public void setStreamClosedListener(java.util.function.LongConsumer listener) {
+        if (exchangeHandler != null) exchangeHandler.setStreamClosedListener(listener);
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     public void setStreamRegistry(ConcurrentHashMap streamRegistry) {
         if (exchangeHandler != null) {

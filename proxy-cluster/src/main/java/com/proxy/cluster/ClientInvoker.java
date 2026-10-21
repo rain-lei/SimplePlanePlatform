@@ -18,13 +18,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 通过 ExchangeClient.request() 发送并返回 Future。
  * </p>
  */
-public class ClientInvoker implements Invoker {
+public class ClientInvoker implements Invoker, AutoCloseable {
 
     private final ExchangeClient exchangeClient;
+    private final String nodeId;
     private final long timeoutMs;
     private final AtomicInteger activeCount = new AtomicInteger(0);
 
     public ClientInvoker(ExchangeClient exchangeClient, long timeoutMs) {
+        this(exchangeClient, timeoutMs, null);
+    }
+
+    public ClientInvoker(ExchangeClient exchangeClient, long timeoutMs, String nodeId) {
+        this.nodeId = nodeId;
         this.exchangeClient = exchangeClient;
         this.timeoutMs = timeoutMs;
     }
@@ -69,6 +75,11 @@ public class ClientInvoker implements Invoker {
                     activeCount.decrementAndGet();
                 });
     }
+
+    public String getNodeId() { return nodeId; }
+
+    @Override
+    public void close() { exchangeClient.close(); }
 
     @Override
     public boolean isAvailable() {

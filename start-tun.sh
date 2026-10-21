@@ -77,7 +77,7 @@ if [ ! -f "$PROXY_JAR" ]; then
     mvn -pl proxy-local -am package -DskipTests -q
 fi
 echo "[1/2] Starting proxy-local..."
-java ${JVM_DNS_OPTS} -jar "$PROXY_JAR" &
+java ${JVM_DNS_OPTS} -jar "$PROXY_JAR" "proxy-local/src/main/resources/proxy.yml" &
 PROXY_PID=$!
 
 # 等待 proxy-local 启动（监听 1080 端口）
