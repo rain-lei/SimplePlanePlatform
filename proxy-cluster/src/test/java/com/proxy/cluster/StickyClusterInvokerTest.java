@@ -15,9 +15,11 @@ class StickyClusterInvokerTest {
         int calls;
         boolean available = true;
         CompletableFuture<Response> connect = CompletableFuture.completedFuture(Response.ok());
+        CompletableFuture<Response> disconnect = CompletableFuture.completedFuture(Response.ok());
         public CompletableFuture<Response> invoke(Invocation invocation) {
             calls++;
             return invocation.getType() == MessageType.CONNECT ? connect
+                    : invocation.getType() == MessageType.DISCONNECT ? disconnect
                     : CompletableFuture.completedFuture(Response.ok());
         }
         public boolean isAvailable() { return available; }
@@ -96,5 +98,19 @@ class StickyClusterInvokerTest {
         assertFalse(connecting.join().isSuccess());
         cluster.retireBindings();
         assertEquals(2, a.calls);
+    }
+
+    @Test void retirementWaitsForRemoteDisconnectAcknowledgement() {
+        StickyClusterInvoker cluster = new StickyClusterInvoker();
+        Connection connection = new Connection();
+        connection.disconnect = new CompletableFuture<>();
+        cluster.setInvokers(Collections.singletonList(connection));
+        cluster.invoke(message(1, MessageType.CONNECT)).join();
+        CompletableFuture<Void> retiring = cluster.retireBindings();
+        assertEquals(0, cluster.getBindingCount());
+        assertFalse(retiring.isDone());
+        connection.disconnect.complete(Response.ok());
+        assertTrue(retiring.isDone());
+        retiring.join();
     }
 }

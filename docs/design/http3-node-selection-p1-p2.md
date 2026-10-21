@@ -114,3 +114,5 @@ python scripts/test-node-selection-ui.py
 进一步精简：移除连接 UUID、物理连接代次、绑定诊断元数据和切换代次判断；保留 `StickyClusterInvoker` 的 ClusterInvoker 接口、SPI 及流绑定；当前 HTTP/3 只向其提供所选节点的一个 Invoker。配置应用和建连由同一个协调线程按顺序执行。保留配置监听、旧连接及流的清理、超时取消和浏览器握手前的数据暂存。
 
 这轮精简后完整 Java `verify` 再次通过：192 个用例，0 失败、0 错误、3 个条件跳过，10 类 HTTP/3 生命周期各循环 8 次并完成资源回收，真实三套加密及独立进程切换用例全部通过。日志为 `.build/http3-simplified-verify.log`。
+
+CI 随后发现旧节点 session 回收的关闭时序问题：切换时 DISCONNECT 发出后立即关闭传输，正常浏览器断开又存在重复关闭路径。修复为切换时最多等待 2 秒的 DISCONNECT 确认后关闭传输（超时仍允许切换）；协调器只取消未完成 CONNECT，已建立流由 RelayHandler 断开。新增等待确认的单元测试，并在真实切换测试中要求发布 B 状态时 A 的 session 已清零。修复后本地完整 `verify` 为 193 个用例、0 失败、0 错误、3 个条件跳过。

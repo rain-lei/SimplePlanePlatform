@@ -105,6 +105,8 @@ class Http3ManualSwitchIntegrationTest {
             Files.write(next, yaml(localPort, portA, portB, certificate, "b", suite).getBytes(StandardCharsets.UTF_8));
             Files.move(next, config, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             awaitStatus(config, "\"currentNodeId\":\"b\"");
+            assertEquals(0, dispatchA.getSessionManager().activeCount(),
+                    "Old node sessions must be released before publishing the switch");
             assertEquals(-1, browserA.getInputStream().read(), "Old browser tunnel must be closed");
             browserB = forkProcess ? connectSocks5(localPort, targetPort) : connect(localPort, targetPort);
             echo(browserB, "after-switch");

@@ -54,9 +54,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         CompletableFuture<Void> result = new CompletableFuture<>();
         submit(() -> {
             if (!selectionKey(snapshot).equals(selectionKey(next))) {
-                sticky.setInvokers(Collections.emptyList());
-                sticky.retireBindings();
-                closeClient();
+                retireClient();
                 nodeStatus = "idle";
             }
             snapshot = next;
@@ -88,7 +86,8 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         result.whenComplete((response, failure) -> pendingConnects.release());
         io.netty.channel.ChannelHandlerContext browser = StreamChannelRegistry.getInstance().get(streamId);
         if (browser != null) browser.channel().closeFuture().addListener(ignored -> {
-            result.completeExceptionally(new java.nio.channels.ClosedChannelException());
+            // Established streams are disconnected by RelayHandler; only cancel pending CONNECT here.
+            if (!result.completeExceptionally(new java.nio.channels.ClosedChannelException())) return;
             sticky.unbind(streamId);
             try {
                 coordinator.execute(() -> {
@@ -169,6 +168,20 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         if (previous != null) previous.close();
     }
 
+    private void retireClient() {
+        sticky.setInvokers(Collections.emptyList());
+        try {
+            // Let the remote release its sessions before closing the QUIC/UDP transport.
+            sticky.retireBindings().get(Math.min(2000, snapshot.getTimeoutMs()), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException ignored) {
+            // An unreachable remote must not prevent a manual switch; close locally below.
+        } finally {
+            closeClient();
+        }
+    }
+
     @Override public boolean isAvailable() { return !closed.get(); }
     @Override public int getActiveCount() { return sticky.getBindingCount(); }
 
@@ -176,9 +189,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
     public void close() {
         if (closed.compareAndSet(false, true)) {
             coordinator.execute(() -> {
-                sticky.setInvokers(Collections.emptyList());
-                sticky.retireBindings();
-                closeClient();
+                retireClient();
             });
             coordinator.shutdown();
             try {

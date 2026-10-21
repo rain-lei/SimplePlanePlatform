@@ -77,15 +77,17 @@ public final class StickyClusterInvoker implements ClusterInvoker {
     public void unbind(long streamId) { bindings.remove(streamId); }
 
     /** Stop all old bindings before retiring their transports; cleanup uses the original concrete invoker. */
-    public void retireBindings() {
+    public CompletableFuture<Void> retireBindings() {
+        List<CompletableFuture<Response>> disconnects = new ArrayList<>();
         bindings.forEach((streamId, binding) -> {
             if (!bindings.remove(streamId, binding)) return;
             binding.active = false;
             Invocation disconnect = new Invocation(null, 0, null, ProxyMessage.MessageType.DISCONNECT);
             disconnect.setAttachment("streamId", streamId);
-            try { binding.invoker.invoke(disconnect); }
+            try { disconnects.add(binding.invoker.invoke(disconnect)); }
             catch (RuntimeException ignored) { /* Transport closure remains the final cleanup boundary. */ }
         });
+        return CompletableFuture.allOf(disconnects.toArray(new CompletableFuture<?>[0]));
     }
 
     public int getBindingCount() { return bindings.size(); }
