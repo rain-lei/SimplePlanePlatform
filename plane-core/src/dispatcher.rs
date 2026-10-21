@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
@@ -8,16 +9,22 @@ use tokio_rustls::{rustls, TlsConnector};
 
 use crate::crypto::Cipher;
 use crate::error::{CoreError, Result};
-use crate::mobile_config::RoutingConfig;
+use crate::mobile_config::{RoutingConfig, Transport};
 use crate::net_probe::FakeDnsEngine;
-use crate::outbound::{
-    proxy_via_remote_counted, OutboundConfig, OutboundConnection, OutboundStream, SocketProtector,
-};
+use crate::outbound::{OutboundConfig, OutboundConnection, SocketProtector};
+use crate::outbound_h3;
 use crate::routing::{ConnectionInfo, Protocol, RouteAction, Router};
 use crate::stats::CoreStats;
 use crate::tcp_stack::{SmolTcpStream, StreamCommand, TcpEvent};
+use crate::transport::{proxy_via_remote_counted, ProxyConnection, ProxyStream};
 
 const PROXY_READ_BUF: usize = 16 * 1024;
+const NODE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+type ConnectionPool = Vec<Mutex<Option<Arc<ProxyConnection>>>>;
+
+fn new_connection_pool(node_count: usize) -> ConnectionPool {
+    (0..node_count).map(|_| Mutex::new(None)).collect()
+}
 
 #[derive(Clone)]
 pub struct RemoteNodeConfig {
@@ -27,6 +34,9 @@ pub struct RemoteNodeConfig {
     pub key: Vec<u8>,
     pub cipher: String,
     pub tls: bool,
+    pub transport: Transport,
+    pub server_name: String,
+    pub ca_pem: String,
 }
 
 #[derive(Clone)]
@@ -54,7 +64,7 @@ where
     }
 
     let router = Router::from_config(&config.routing)?;
-    let mut proxy_conn: Option<(usize, OutboundConnection)> = None;
+    let proxy_conn = Arc::new(new_connection_pool(config.nodes.len()));
 
     tracing::info!(
         "dispatcher started with {} node(s), default route={}",
@@ -123,30 +133,56 @@ where
                         });
                     }
                     RouteAction::Proxy => {
-                        match open_proxy_with_failover(&config, protector.as_ref(), &mut proxy_conn, &target_host, dst_port).await {
-                            Ok((stream, node_name)) => {
-                                config.stats.begin_connection();
-                                config.stats.inc_proxy();
-                                config.stats.set_active_node(node_name);
-                                let local = SmolTcpStream::new(stream_tx, stream_rx, notify_tx.clone());
-                                let stats = Arc::clone(&config.stats);
-                                tokio::spawn(async move {
-                                    if let Err(e) = proxy_via_remote_counted(stream, local, PROXY_READ_BUF, Some(Arc::clone(&stats))).await {
+                        let config = config.clone();
+                        let protector = Arc::clone(&protector);
+                        let proxy_conn = Arc::clone(&proxy_conn);
+                        let notify_tx = notify_tx.clone();
+                        let mut shutdown_rx = shutdown_rx.clone();
+                        tokio::spawn(async move {
+                            // A slow/dead proxy node must not block the dispatcher
+                            // from handling direct connections or the stop signal.
+                            let open = open_proxy_with_failover(&config, protector.as_ref(), &proxy_conn, &target_host, dst_port);
+                            let result = tokio::select! {
+                                _ = shutdown_rx.changed() => return,
+                                result = tokio::time::timeout(Duration::from_secs(30), open) => {
+                                    result.unwrap_or_else(|_| Err(CoreError::Protocol(
+                                        format!("proxy connection to {target_host}:{dst_port} timed out after 30s")
+                                    )))
+                                }
+                            };
+                            match result {
+                                Ok((stream, node_name)) => {
+                                    config.stats.set_state("connected");
+                                    config.stats.set_error("");
+                                    config.stats.begin_connection();
+                                    config.stats.inc_proxy();
+                                    config.stats.set_active_node(node_name);
+                                    let local = SmolTcpStream::new(stream_tx, stream_rx, notify_tx.clone());
+                                    let stats = Arc::clone(&config.stats);
+                                    let forwarding = proxy_via_remote_counted(stream, local, PROXY_READ_BUF, Some(Arc::clone(&stats)));
+                                    let result = tokio::select! {
+                                        _ = shutdown_rx.changed() => Ok(()),
+                                        result = forwarding => result,
+                                    };
+                                    if let Err(e) = result {
+                                        stats.set_state("proxy_error");
                                         stats.inc_failed();
                                         stats.set_error(format!("proxy: {e}"));
                                         tracing::warn!("proxy connection ended with error: {e}");
                                     }
                                     stats.end_connection();
-                                });
+                                }
+                                Err(e) => {
+                                    if !matches!(&e, CoreError::TargetRejected(_)) {
+                                        config.stats.set_state("proxy_error");
+                                    }
+                                    config.stats.inc_failed();
+                                    config.stats.set_error(format!("proxy open: {e}"));
+                                    tracing::error!("failed to open proxy stream for {target_host}:{dst_port}: {e}");
+                                    let _ = stream_tx.try_send(StreamCommand::Close);
+                                }
                             }
-                            Err(e) => {
-                                config.stats.inc_failed();
-                                config.stats.set_error(format!("proxy open: {e}"));
-                                tracing::error!("failed to open proxy stream for {target_host}:{dst_port}: {e}");
-                                let _ = stream_tx.try_send(StreamCommand::Close);
-                                proxy_conn = None;
-                            }
-                        }
+                        });
                     }
                 }
             }
@@ -157,45 +193,51 @@ where
 async fn open_proxy_with_failover<P>(
     config: &DispatcherConfig,
     protector: &P,
-    active: &mut Option<(usize, OutboundConnection)>,
+    pool: &ConnectionPool,
     host: &str,
     port: u16,
-) -> Result<(OutboundStream, String)>
+) -> Result<(ProxyStream, String)>
 where
     P: SocketProtector,
 {
-    if let Some((idx, conn)) = active.as_mut() {
-        match conn.open_proxy_stream(host, port).await {
-            Ok(stream) => {
-                let name = config.nodes[*idx].name.clone();
-                return Ok((stream, name));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "active node {} failed to open stream: {e}; trying failover",
-                    config.nodes[*idx].name
-                );
-            }
-        }
-    }
-    *active = None;
-
     let mut last_error: Option<CoreError> = None;
     for (idx, node) in config.nodes.iter().enumerate() {
-        match establish_outbound(node, protector).await {
-            Ok(mut conn) => match conn.open_proxy_stream(host, port).await {
-                Ok(stream) => {
-                    let name = node.name.clone();
-                    *active = Some((idx, conn));
-                    return Ok((stream, name));
+        // Serialize only connection creation. Waiting for a target's CONNECT
+        // acknowledgement must not hold up requests to other destinations.
+        let connection = {
+            let mut cached = pool[idx].lock().await;
+            if let Some(connection) = cached.as_ref() {
+                Arc::clone(connection)
+            } else {
+                match establish_outbound(node, protector).await {
+                    Ok(connection) => {
+                        let connection = Arc::new(connection);
+                        *cached = Some(Arc::clone(&connection));
+                        connection
+                    }
+                    Err(e) => {
+                        tracing::warn!("node {} connect failed: {e}", node.name);
+                        last_error = Some(e);
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("node {} opened tcp/h2 but stream failed: {e}", node.name);
-                    last_error = Some(e);
-                }
-            },
+            }
+        };
+        let mut sender = connection.as_ref().clone();
+        match sender.open_proxy_stream(host, port).await {
+            Ok(stream) => return Ok((stream, node.name.clone())),
+            // The node decrypted and answered CONNECT. A destination refusal
+            // is not a broken node and must not tear down unrelated flows.
+            Err(e @ CoreError::TargetRejected(_)) => return Err(e),
             Err(e) => {
-                tracing::warn!("node {} connect failed: {e}", node.name);
+                tracing::warn!("node {} proxy stream failed: {e}", node.name);
+                let mut cached = pool[idx].lock().await;
+                if cached
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &connection))
+                {
+                    *cached = None;
+                }
                 last_error = Some(e);
             }
         }
@@ -206,7 +248,7 @@ where
     }))
 }
 
-async fn establish_outbound<P>(node: &RemoteNodeConfig, protector: &P) -> Result<OutboundConnection>
+async fn establish_outbound<P>(node: &RemoteNodeConfig, protector: &P) -> Result<ProxyConnection>
 where
     P: SocketProtector,
 {
@@ -217,8 +259,26 @@ where
         )));
     }
 
-    let tcp = connect_protected(&node.host, node.port, protector).await?;
     let cipher = Cipher::new(&node.key)?;
+    if node.transport == Transport::Http3 {
+        let addr = resolve_server_addr_with_protector(&node.host, node.port, protector)?;
+        return outbound_h3::OutboundConnection::connect(
+            addr,
+            protector,
+            cipher,
+            outbound_h3::OutboundConfig {
+                server_host: node.host.clone(),
+                server_port: node.port,
+                server_name: node.server_name.clone(),
+                ca_pem: node.ca_pem.clone(),
+                tls: true,
+            },
+        )
+        .await
+        .map(ProxyConnection::Http3);
+    }
+
+    let tcp = connect_protected(&node.host, node.port, protector).await?;
     let outbound_cfg = OutboundConfig {
         server_host: node.host.clone(),
         server_port: node.port,
@@ -226,10 +286,19 @@ where
     };
 
     if node.tls {
-        let tls = connect_tls(tcp, &node.host).await?;
-        OutboundConnection::handshake(tls, cipher, outbound_cfg).await
+        let server_name = if node.server_name.is_empty() {
+            &node.host
+        } else {
+            &node.server_name
+        };
+        let tls = connect_tls(tcp, server_name).await?;
+        OutboundConnection::handshake(tls, cipher, outbound_cfg)
+            .await
+            .map(ProxyConnection::Http2)
     } else {
-        OutboundConnection::handshake(tcp, cipher, outbound_cfg).await
+        OutboundConnection::handshake(tcp, cipher, outbound_cfg)
+            .await
+            .map(ProxyConnection::Http2)
     }
 }
 
@@ -288,11 +357,19 @@ where
         )));
     }
 
-    let tcp = socket.connect(addr).await.map_err(|e| {
-        CoreError::Io(std::io::Error::other(format!(
-            "connect {host}:{port} ({addr}) failed: {e}"
-        )))
-    })?;
+    let tcp = tokio::time::timeout(NODE_CONNECT_TIMEOUT, socket.connect(addr))
+        .await
+        .map_err(|_| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("TCP connect {host}:{port} ({addr}) timed out after 10s"),
+            ))
+        })?
+        .map_err(|e| {
+            CoreError::Io(std::io::Error::other(format!(
+                "connect {host}:{port} ({addr}) failed: {e}"
+            )))
+        })?;
     tcp.set_nodelay(true).ok();
     Ok(tcp)
 }
@@ -310,9 +387,14 @@ async fn connect_tls(
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| CoreError::InvalidArgument(format!("invalid TLS server name {host}: {e}")))?;
     let connector = TlsConnector::from(Arc::new(tls_config));
-    connector
-        .connect(server_name, tcp)
+    tokio::time::timeout(NODE_CONNECT_TIMEOUT, connector.connect(server_name, tcp))
         .await
+        .map_err(|_| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("TLS handshake with {host} timed out after 10s"),
+            ))
+        })?
         .map_err(|e| CoreError::Io(std::io::Error::other(format!("TLS connect failed: {e}"))))
 }
 
@@ -446,5 +528,258 @@ mod tests {
         let err = resolve_server_addr_with_protector("example.invalid", 443, &protector)
             .expect_err("protected DNS failure must be terminal");
         assert!(err.to_string().contains("protected DNS resolution failed"));
+    }
+
+    #[tokio::test]
+    async fn stalled_proxy_does_not_block_direct_connections_or_shutdown() {
+        use crate::mobile_config::RuleConfig;
+        use crate::outbound::NoopProtector;
+        use tokio::net::TcpListener;
+
+        // Accept TCP but never answer HTTP/2; this models a wrong-protocol or
+        // unresponsive node while a separate local destination remains healthy.
+        let stalled_node = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let direct_target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let direct_port = direct_target.local_addr().unwrap().port();
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (notify_tx, _notify_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let stats = Arc::new(CoreStats::new());
+        let config = DispatcherConfig {
+            nodes: vec![RemoteNodeConfig {
+                name: "stalled".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: stalled_node.local_addr().unwrap().port(),
+                key: b"test-key".to_vec(),
+                cipher: "chacha20".to_string(),
+                tls: false,
+                transport: Transport::Http2,
+                server_name: String::new(),
+                ca_pem: String::new(),
+            }],
+            routing: RoutingConfig {
+                default_action: "proxy".to_string(),
+                cn_direct: false,
+                rules: vec![RuleConfig {
+                    rule_type: "port".to_string(),
+                    value: direct_port.to_string(),
+                    action: "direct".to_string(),
+                }],
+            },
+            stats,
+        };
+        let dispatcher = tokio::spawn(run_dispatcher(
+            event_rx,
+            Arc::new(Mutex::new(FakeDnsEngine::new("198.18.0.0/15", 32))),
+            config,
+            Arc::new(NoopProtector),
+            notify_tx,
+            shutdown_rx,
+        ));
+        let (proxy_tx, _proxy_rx) = mpsc::channel(4);
+        let (_proxy_data_tx, proxy_data_rx) = mpsc::channel(4);
+        event_tx
+            .send(TcpEvent::NewConnection {
+                src_ip: Ipv4Addr::LOCALHOST,
+                dst_ip: Ipv4Addr::LOCALHOST,
+                dst_port: 443,
+                stream_tx: proxy_tx,
+                stream_rx: proxy_data_rx,
+            })
+            .await
+            .unwrap();
+        let (_stalled_socket, _) =
+            tokio::time::timeout(Duration::from_secs(2), stalled_node.accept())
+                .await
+                .unwrap()
+                .unwrap();
+
+        let (direct_tx, _direct_rx) = mpsc::channel(4);
+        let (_direct_data_tx, direct_data_rx) = mpsc::channel(4);
+        event_tx
+            .send(TcpEvent::NewConnection {
+                src_ip: Ipv4Addr::LOCALHOST,
+                dst_ip: Ipv4Addr::LOCALHOST,
+                dst_port: direct_port,
+                stream_tx: direct_tx,
+                stream_rx: direct_data_rx,
+            })
+            .await
+            .unwrap();
+        let (_direct_socket, _) =
+            tokio::time::timeout(Duration::from_secs(2), direct_target.accept())
+                .await
+                .expect("direct traffic blocked by pending proxy CONNECT")
+                .unwrap();
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), dispatcher)
+            .await
+            .expect("dispatcher ignored shutdown while CONNECT was pending")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn slow_or_rejected_target_does_not_block_or_replace_other_proxy_streams() {
+        let (addr, ca_pem, server) = crate::outbound_h3::tests::mock_proxy(200, Some(200)).await;
+        let config = DispatcherConfig {
+            nodes: vec![RemoteNodeConfig {
+                name: "mock".into(),
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                key: b"test-key".to_vec(),
+                cipher: "chacha20".into(),
+                tls: true,
+                transport: Transport::Http3,
+                server_name: "localhost".into(),
+                ca_pem,
+            }],
+            routing: RoutingConfig::default(),
+            stats: Arc::new(CoreStats::new()),
+        };
+        let pool = new_connection_pool(1);
+        let protector = crate::outbound::NoopProtector;
+        let (mut original_stream, _) =
+            open_proxy_with_failover(&config, &protector, &pool, "example.com", 80)
+                .await
+                .unwrap();
+        let original_connection = pool[0].lock().await.as_ref().unwrap().clone();
+
+        let slow = open_proxy_with_failover(&config, &protector, &pool, "slow.test", 80);
+        tokio::pin!(slow);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut slow)
+            .await
+            .is_err());
+        let (_second, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            open_proxy_with_failover(&config, &protector, &pool, "example.com", 80),
+        )
+        .await
+        .expect("slow destination blocked another proxy connection")
+        .unwrap();
+
+        let rejection =
+            open_proxy_with_failover(&config, &protector, &pool, "reject.test", 80).await;
+        assert!(matches!(rejection, Err(CoreError::TargetRejected(_))));
+        assert!(Arc::ptr_eq(
+            pool[0].lock().await.as_ref().unwrap(),
+            &original_connection
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut greeting = Vec::new();
+            while greeting.len() < 8 {
+                for message in original_stream.recv_messages().await.unwrap().unwrap() {
+                    greeting.extend(message.data);
+                }
+            }
+            original_stream.send_payload(b"alive").await.unwrap();
+            let mut echoed = Vec::new();
+            while echoed.len() < 5 {
+                for message in original_stream.recv_messages().await.unwrap().unwrap() {
+                    echoed.extend(message.data);
+                }
+            }
+            assert_eq!(echoed, b"alive");
+        })
+        .await
+        .expect("rejected destination interrupted an existing stream");
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PLANE_NODE_HOST, PLANE_NODE_PORT and PLANE_NODE_KEY"]
+    async fn configured_node_http_probe() {
+        let node = RemoteNodeConfig {
+            name: "diagnostic".to_string(),
+            host: std::env::var("PLANE_NODE_HOST").expect("PLANE_NODE_HOST"),
+            port: std::env::var("PLANE_NODE_PORT")
+                .expect("PLANE_NODE_PORT")
+                .parse()
+                .unwrap(),
+            key: std::env::var("PLANE_NODE_KEY")
+                .expect("PLANE_NODE_KEY")
+                .into_bytes(),
+            cipher: "chacha20".to_string(),
+            tls: std::env::var("PLANE_NODE_TLS").as_deref() == Ok("true"),
+            transport: if std::env::var("PLANE_NODE_TRANSPORT").as_deref() == Ok("http3") {
+                Transport::Http3
+            } else {
+                Transport::Http2
+            },
+            server_name: std::env::var("PLANE_NODE_SERVER_NAME").unwrap_or_default(),
+            ca_pem: std::env::var("PLANE_NODE_CA_FILE")
+                .ok()
+                .map(|path| std::fs::read_to_string(path).unwrap())
+                .unwrap_or_default(),
+        };
+        let mut connection = establish_outbound(&node, &crate::outbound::NoopProtector)
+            .await
+            .expect("node transport handshake failed");
+        async fn request<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+            mut io: T,
+        ) -> String {
+            io.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut data = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = io.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buf[..n]);
+                if data.windows(2).any(|pair| pair == b"\r\n") {
+                    break;
+                }
+            }
+            let _ = io.shutdown().await;
+            String::from_utf8_lossy(&data)
+                .lines()
+                .next()
+                .unwrap_or("<empty>")
+                .to_string()
+        }
+
+        // Exercise the actual bidirectional forwarding loop for both HTTP and
+        // HTTPS, including certificate verification at the destination website.
+        for port in [80, 443] {
+            let stream = connection
+                .open_proxy_stream("example.com", port)
+                .await
+                .expect("encrypted CONNECT failed");
+            let (local, application) = tokio::io::duplex(65536);
+            let forwarding = tokio::spawn(proxy_via_remote_counted(
+                stream,
+                local,
+                PROXY_READ_BUF,
+                None,
+            ));
+            let status = tokio::time::timeout(Duration::from_secs(15), async {
+                if port == 443 {
+                    let mut roots = rustls::RootCertStore::empty();
+                    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                    let tls = rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth();
+                    let connector = TlsConnector::from(Arc::new(tls));
+                    let tls = connector
+                        .connect("example.com".try_into().unwrap(), application)
+                        .await
+                        .unwrap();
+                    request(tls).await
+                } else {
+                    request(application).await
+                }
+            })
+            .await
+            .expect("web response through tunnel timed out");
+            eprintln!("Tunnel example.com:{port}: {status}");
+            assert!(
+                status.starts_with("HTTP/1."),
+                "no HTTP response through proxy"
+            );
+            forwarding.abort();
+        }
     }
 }

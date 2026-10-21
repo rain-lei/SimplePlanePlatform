@@ -13,6 +13,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -256,6 +257,9 @@ class MainActivity : AppCompatActivity() {
                 cipher = row.cipherInput.text.toString().trim().ifBlank { VpnConfigStore.DEFAULT_CIPHER },
                 tls = row.tlsCheckBox.isChecked,
                 enabled = row.enabledCheckBox.isChecked,
+                transport = if (row.transportSpinner.selectedItemPosition == 1) "http3" else "http2",
+                serverName = row.serverNameInput.text.toString().trim(),
+                caPem = row.caPem,
             )
         }
 
@@ -365,7 +369,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateVpnUi(running: Boolean, message: String? = null) {
         vpnRunning = running
         toggleVpnButton.text = getString(if (running) R.string.disconnect_vpn else R.string.connect_vpn)
-        vpnStatusText.text = message ?: getString(if (running) R.string.vpn_status_connected else R.string.vpn_status_idle)
+        vpnStatusText.text = message ?: PlaneVpnService.latestStatusMessage
         setConfigInputsEnabled(!running)
     }
 
@@ -401,7 +405,9 @@ class MainActivity : AppCompatActivity() {
             val direct = obj.optLong("direct_connections", 0)
             val rejected = obj.optLong("rejected_connections", 0)
             val node = obj.optString("active_node", "-").ifBlank { "-" }
-            "上行 $up / 下行 $down\n连接 活跃 $active / 总计 $total · 代理 $proxy · 直连 $direct · 拒绝 $rejected\n当前节点 $node"
+            val error = obj.optString("last_error").takeIf { it.isNotBlank() }
+                ?.let { "\n最近错误：$it" }.orEmpty()
+            "上行 $up / 下行 $down\n连接 活跃 $active / 总计 $total · 代理 $proxy · 直连 $direct · 拒绝 $rejected\n当前节点 $node$error"
         }.getOrElse {
             getString(R.string.stats_empty)
         }
@@ -430,6 +436,9 @@ class MainActivity : AppCompatActivity() {
         val portInput: EditText,
         val keyInput: EditText,
         val cipherInput: EditText,
+        val transportSpinner: Spinner,
+        val serverNameInput: EditText,
+        val caPem: String,
         val tlsCheckBox: CheckBox,
         val enabledCheckBox: CheckBox,
         private val removeButton: Button,
@@ -441,8 +450,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun setEnabled(enabled: Boolean) {
-            listOf(nameInput, hostInput, portInput, keyInput, cipherInput, tlsCheckBox, enabledCheckBox, removeButton)
+            listOf(nameInput, hostInput, portInput, keyInput, cipherInput, transportSpinner, serverNameInput, enabledCheckBox, removeButton)
                 .forEach { it.isEnabled = enabled }
+            tlsCheckBox.isEnabled = enabled && transportSpinner.selectedItemPosition == 0
         }
 
         companion object {
@@ -465,9 +475,22 @@ class MainActivity : AppCompatActivity() {
                 val port = input("端口", node.port.toString(), InputType.TYPE_CLASS_NUMBER)
                 val key = input("加密密钥", node.key, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
                 val cipher = input("加密方式", node.cipher)
+                val transport = Spinner(context).apply {
+                    adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, listOf("HTTP/2 (TCP)", "HTTP/3 (QUIC)"))
+                    setSelection(if (node.transport == "http3") 1 else 0)
+                }
+                val serverName = input("TLS 服务器名称（留空使用节点地址）", node.serverName)
                 val tls = CheckBox(context).apply {
                     text = "TLS 出站"
-                    isChecked = node.tls
+                    isChecked = node.tls || node.transport == "http3"
+                    isEnabled = node.transport != "http3"
+                }
+                transport.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                        tls.isEnabled = transport.isEnabled && position == 0
+                        if (position == 1) tls.isChecked = true
+                    }
+                    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
                 val enabled = CheckBox(context).apply {
                     text = "启用节点"
@@ -479,11 +502,13 @@ class MainActivity : AppCompatActivity() {
                 root.addView(port)
                 root.addView(key)
                 root.addView(cipher)
+                root.addView(transport)
+                root.addView(serverName)
                 root.addView(tls)
                 root.addView(enabled)
                 root.addView(remove)
                 lateinit var row: NodeRow
-                row = NodeRow(root, name, host, port, key, cipher, tls, enabled, remove)
+                row = NodeRow(root, name, host, port, key, cipher, transport, serverName, node.caPem, tls, enabled, remove)
                 remove.setOnClickListener { onRemove(row) }
                 return row
             }

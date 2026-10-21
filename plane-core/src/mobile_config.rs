@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Transport {
+    #[default]
+    #[serde(rename = "http2", alias = "h2")]
+    Http2,
+    #[serde(rename = "http3", alias = "h3", alias = "quic")]
+    Http3,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AndroidConfig {
     #[serde(default = "default_mtu")]
@@ -15,6 +24,13 @@ pub struct AndroidConfig {
     pub cipher: String,
     #[serde(default)]
     pub tls: bool,
+
+    #[serde(default)]
+    pub transport: Transport,
+    #[serde(default, alias = "serverName")]
+    pub server_name: String,
+    #[serde(default, alias = "caPem")]
+    pub ca_pem: String,
 
     #[serde(default, alias = "remoteServers")]
     pub remotes: Vec<RemoteNode>,
@@ -38,6 +54,12 @@ pub struct RemoteNode {
     pub cipher: String,
     #[serde(default, alias = "ssl")]
     pub tls: bool,
+    #[serde(default)]
+    pub transport: Transport,
+    #[serde(default, alias = "serverName")]
+    pub server_name: String,
+    #[serde(default, alias = "caPem")]
+    pub ca_pem: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -103,6 +125,9 @@ impl Default for AndroidConfig {
             remote_key: String::new(),
             cipher: default_cipher(),
             tls: false,
+            transport: Transport::Http2,
+            server_name: String::new(),
+            ca_pem: String::new(),
             remotes: Vec::new(),
             routing: RoutingConfig::default(),
             route: DesktopRouteConfig::default(),
@@ -167,6 +192,9 @@ impl AndroidConfig {
             key: self.remote_key.clone(),
             cipher: self.cipher.clone(),
             tls: self.tls,
+            transport: self.transport,
+            server_name: self.server_name.clone(),
+            ca_pem: self.ca_pem.clone(),
             enabled: true,
         };
         if legacy.ready() {
@@ -259,6 +287,19 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert!(nodes[0].tls);
         assert_eq!(nodes[0].key, "k");
+        assert_eq!(nodes[0].transport, Transport::Http2);
+    }
+
+    #[test]
+    fn http3_node_transport_and_certificate_are_preserved() {
+        let c = AndroidConfig::from_json(
+            r#"{"remotes":[{"host":"proxy.example","port":9090,"key":"k","transport":"http3","server_name":"proxy.example","ca_pem":"certificate"}]}"#,
+        ).unwrap();
+        let node = c.normalized_remotes().remove(0);
+        assert_eq!(node.transport, Transport::Http3);
+        assert_eq!(node.server_name, "proxy.example");
+        assert_eq!(node.ca_pem, "certificate");
+        assert!(AndroidConfig::from_json(r#"{"transport":"unknown"}"#).is_err());
     }
 
     #[test]

@@ -223,6 +223,8 @@ fn native_start_impl(
         stats: Arc::clone(&stats),
     });
 
+    // Set the initial state before workers can report a connection or an error.
+    stats.set_state("ready");
     {
         // AndroidTun wraps the raw fd in tokio::io::unix::AsyncFd, which must be
         // created while a Tokio reactor is active. nativeStart runs on a Java
@@ -230,8 +232,9 @@ fn native_start_impl(
         let _runtime_guard = handle.rt.enter();
         spawn_data_plane(&handle, &cb, tun_fd, &config)?;
     }
-    stats.set_state("connected");
-    let _ = cb.on_status("connected");
+    // TUN creation does not prove that a proxy node or destination is reachable.
+    // The dispatcher reports connected only after a successful CONNECT response.
+    let _ = cb.on_status("ready");
 
     Ok(Box::into_raw(handle) as jlong)
 }
@@ -263,6 +266,9 @@ fn spawn_data_plane(
             key: node.key.into_bytes(),
             cipher: node.cipher,
             tls: node.tls,
+            transport: node.transport,
+            server_name: node.server_name,
+            ca_pem: node.ca_pem,
         })
         .collect();
     let dispatcher_cfg = DispatcherConfig {

@@ -15,6 +15,9 @@ data class RemoteNodeConfig(
     val cipher: String = VpnConfigStore.DEFAULT_CIPHER,
     val tls: Boolean = false,
     val enabled: Boolean = true,
+    val transport: String = "http2",
+    val serverName: String = "",
+    val caPem: String = "",
 )
 
 data class RouteRuleConfig(
@@ -41,6 +44,7 @@ data class AndroidVpnConfig(
             if (node.host.isBlank()) return "节点 ${index + 1} 缺少地址"
             if (node.port !in 1..65535) return "节点 ${index + 1} 端口必须在 1-65535"
             if (node.key.isBlank()) return "节点 ${index + 1} 缺少加密密钥"
+            if (node.transport !in setOf("http2", "http3")) return "节点 ${index + 1} 协议必须是 HTTP/2 或 HTTP/3"
             if (!node.cipher.equals(DEFAULT_SUPPORTED_CIPHER, ignoreCase = true)) {
                 return "Android core 当前支持 $DEFAULT_SUPPORTED_CIPHER，节点 ${index + 1} 使用了 ${node.cipher}"
             }
@@ -68,7 +72,10 @@ data class AndroidVpnConfig(
                         .put("key", node.key)
                         .put("cipher", node.cipher)
                         .put("tls", node.tls)
-                        .put("enabled", node.enabled))
+                        .put("enabled", node.enabled)
+                        .put("transport", node.transport)
+                        .put("server_name", node.serverName)
+                        .put("ca_pem", node.caPem))
                 }
             })
             .put("routing", JSONObject()
@@ -94,6 +101,9 @@ data class AndroidVpnConfig(
             builder.appendLine("    cipher: ${node.cipher}")
             builder.appendLine("    cipherKey: \"${node.key.replace("\"", "\\\"")}\"")
             builder.appendLine("    ssl: ${node.tls}")
+            builder.appendLine("    transport: ${node.transport}")
+            if (node.serverName.isNotBlank()) builder.appendLine("    serverName: ${JSONObject.quote(node.serverName)}")
+            if (node.caPem.isNotBlank()) builder.appendLine("    caPem: ${JSONObject.quote(node.caPem)}")
         }
         builder.appendLine("route:")
         builder.appendLine("  defaultRoute: ${routing.defaultAction}")
@@ -128,6 +138,8 @@ data class AndroidVpnConfig(
                     host = VpnConfigStore.DEFAULT_REMOTE_HOST,
                     port = VpnConfigStore.DEFAULT_REMOTE_PORT,
                     key = VpnConfigStore.DEFAULT_REMOTE_KEY,
+                    transport = "http3",
+                    tls = true,
                 ),
             ),
             routing = AndroidRoutingConfig(
@@ -157,6 +169,9 @@ data class AndroidVpnConfig(
                         key = root.optString("remote_key", VpnConfigStore.DEFAULT_REMOTE_KEY),
                         cipher = root.optString("cipher", VpnConfigStore.DEFAULT_CIPHER),
                         tls = root.optBoolean("tls", false),
+                        transport = normalizeTransport(root.optString("transport", "http2")),
+                        serverName = root.optString("server_name", root.optString("serverName")),
+                        caPem = root.optString("ca_pem", root.optString("caPem")),
                     ))
                 },
                 routing = routing,
@@ -186,6 +201,9 @@ data class AndroidVpnConfig(
                         cipher = item.optString("cipher", VpnConfigStore.DEFAULT_CIPHER),
                         tls = item.optBoolean("tls", item.optBoolean("ssl", false)),
                         enabled = item.optBoolean("enabled", true),
+                        transport = normalizeTransport(item.optString("transport", "http2")),
+                        serverName = item.optString("server_name", item.optString("serverName")),
+                        caPem = item.optString("ca_pem", item.optString("caPem")),
                     ))
                 }
             }
@@ -287,6 +305,9 @@ data class AndroidVpnConfig(
                     cipher = map["cipher"] ?: VpnConfigStore.DEFAULT_CIPHER,
                     tls = (map["tls"] ?: map["ssl"]).equals("true", ignoreCase = true),
                     enabled = !map["enabled"].equals("false", ignoreCase = true),
+                    transport = normalizeTransport(map["transport"] ?: "http2"),
+                    serverName = map["server_name"] ?: map["serverName"] ?: "",
+                    caPem = map["ca_pem"] ?: map["caPem"] ?: "",
                 )
             }
             val rules = directList.map { RouteRuleConfig("domain_pattern", it, "direct") } +
@@ -309,8 +330,19 @@ data class AndroidVpnConfig(
             return key to value
         }
 
-        private fun cleanValue(value: String): String =
-            value.trim().trim('"').trim('\'')
+        private fun cleanValue(value: String): String {
+            val trimmed = value.trim()
+            if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+                return runCatching { JSONArray("[$trimmed]").getString(0) }.getOrDefault(trimmed.trim('"'))
+            }
+            return trimmed.trim('\'')
+        }
+
+        private fun normalizeTransport(value: String): String = when (val lower = value.lowercase(Locale.ROOT)) {
+            "h2" -> "http2"
+            "h3", "quic" -> "http3"
+            else -> lower
+        }
     }
 }
 
@@ -321,7 +353,7 @@ data class ConfigPreset(
 
 object VpnConfigStore {
     const val DEFAULT_MTU = 1500
-    const val DEFAULT_REMOTE_HOST = "54.234.196.30"
+    const val DEFAULT_REMOTE_HOST = "54.172.101.190"
     const val DEFAULT_REMOTE_PORT = 9090
     const val DEFAULT_REMOTE_KEY = "your-cipher-key"
     const val DEFAULT_CIPHER = "chacha20"
@@ -334,9 +366,26 @@ object VpnConfigStore {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val json = prefs.getString(KEY_CONFIG_JSON, null)
         if (!json.isNullOrBlank()) {
-            return runCatching { AndroidVpnConfig.fromJson(json) }.getOrElse { AndroidVpnConfig.defaultConfig() }
+            val saved = runCatching { AndroidVpnConfig.fromJson(json) }.getOrElse { AndroidVpnConfig.defaultConfig() }
+            val migrated = migrateLegacyDefault(saved)
+            if (migrated != saved) {
+                save(context, migrated)
+                AppLogStore.add("旧默认节点已更新为 $DEFAULT_REMOTE_HOST:$DEFAULT_REMOTE_PORT HTTP/3")
+            }
+            return migrated
         }
         return AndroidVpnConfig.defaultConfig()
+    }
+
+    // Only migrate the untouched node shipped in the July APK. User-configured
+    // hosts, credentials, protocols and multi-node lists must stay intact.
+    internal fun migrateLegacyDefault(config: AndroidVpnConfig): AndroidVpnConfig {
+        val node = config.remotes.singleOrNull() ?: return config
+        if (node.host != "54.234.196.30" || node.port != DEFAULT_REMOTE_PORT ||
+            node.key != DEFAULT_REMOTE_KEY || node.cipher != DEFAULT_CIPHER ||
+            node.transport != "http2" || node.tls || node.serverName.isNotBlank() || node.caPem.isNotBlank()
+        ) return config
+        return config.copy(remotes = listOf(node.copy(host = DEFAULT_REMOTE_HOST, transport = "http3", tls = true)))
     }
 
     fun save(context: Context, config: AndroidVpnConfig) {

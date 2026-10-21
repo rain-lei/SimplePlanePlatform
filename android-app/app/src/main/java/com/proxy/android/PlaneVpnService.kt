@@ -17,6 +17,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.net.Inet4Address
+import org.json.JSONObject
 
 class PlaneVpnService : VpnService() {
     private val bridge: NativeBridge by lazy { NativeBridge(this) }
@@ -35,6 +36,7 @@ class PlaneVpnService : VpnService() {
                 .getOrElse { """{"running":true,"state":"stats_error"}""" }
             latestStatsJson = json
             publishStats(json)
+            refreshNativeStatus(json)
             mainHandler.postDelayed(this, STATS_INTERVAL_MS)
         }
     }
@@ -46,14 +48,14 @@ class PlaneVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
+        if (nativeHandle != 0L) {
+            publishStatus(running = true, message = latestStatusMessage)
+            return START_STICKY
+        }
+
         ensureNotificationChannel()
         startForegroundCompat(getString(R.string.vpn_status_connecting))
         publishStatus(running = true, message = getString(R.string.vpn_status_connecting))
-
-        if (nativeHandle != 0L) {
-            publishStatus(running = true, message = getString(R.string.vpn_status_connected))
-            return START_STICKY
-        }
 
         if (!startDataPlane(intent)) {
             publishStatus(running = false, message = getString(R.string.vpn_status_error))
@@ -61,11 +63,17 @@ class PlaneVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        publishStatus(running = true, message = getString(R.string.vpn_status_connected))
+        publishStatus(running = true, message = getString(R.string.vpn_status_ready))
         return START_STICKY
     }
 
     private fun startDataPlane(intent: Intent?): Boolean {
+        val configJson = runCatching { buildConfigJson(intent) }
+            .onFailure {
+                Log.e(TAG, "VPN configuration could not be loaded", it)
+                AppLogStore.add("配置或证书加载失败，请检查节点配置")
+            }
+            .getOrNull() ?: return false
         val pfd = establishTun() ?: run {
             Log.e(TAG, "establish TUN failed")
             AppLogStore.add("建立 TUN 失败，请确认 VPN 授权")
@@ -73,7 +81,6 @@ class PlaneVpnService : VpnService() {
         }
         tunInterface = pfd
 
-        val configJson = buildConfigJson(intent)
         val nativeBridge = runCatching { bridge }
             .onFailure { Log.e(TAG, "NativeBridge init failed", it) }
             .getOrElse {
@@ -116,8 +123,8 @@ class PlaneVpnService : VpnService() {
                 .addDisallowedApplication(packageName)
                 .addAddress(TUN_ADDRESS, TUN_PREFIX)
                 .addRoute("0.0.0.0", 0)
-                .addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
-                .addRoute("::", 0)
+                // The native data plane forwards IPv4 only. Leaving IPv6
+                // unconfigured makes Android block it and use IPv4 fallback.
                 .addDnsServer(FAKE_DNS_SERVER)
                 .establish()
         }.onFailure { Log.e(TAG, "establish threw", it) }.getOrNull()
@@ -182,30 +189,53 @@ class PlaneVpnService : VpnService() {
         }
 
         return connectivity.activeNetwork?.takeIf(::isUsable)
+            ?: connectivity.allNetworks.firstOrNull(::isUsable)
     }
 
     private fun buildConfigJson(intent: Intent?): String {
         val explicit = intent?.getStringExtra(EXTRA_CONFIG_JSON)?.takeIf { it.isNotBlank() }
         val json = explicit ?: VpnConfigStore.load(this).toJsonString()
-        val summary = runCatching {
-            val config = AndroidVpnConfig.fromJson(json)
-            "节点 ${config.remotes.count { it.enabled }}/${config.remotes.size}，规则 ${config.routing.rules.size}，默认 ${config.routing.defaultAction}"
-        }.getOrDefault("原始配置")
+        val config = AndroidVpnConfig.fromJson(json)
+        // Trust the deployment certificate only for its configured node. Other
+        // hosts use system roots or an explicitly imported CA, never this pin.
+        val nativeConfig = config.copy(remotes = config.remotes.map { node ->
+            if (node.transport == "http3" && node.host == VpnConfigStore.DEFAULT_REMOTE_HOST && node.caPem.isBlank()) {
+                node.copy(caPem = assets.open("http3-remote-ca.crt").bufferedReader().use { it.readText() })
+            } else node
+        })
+        val summary = "节点 ${config.remotes.count { it.enabled }}/${config.remotes.size}，协议 ${config.remotes.filter { it.enabled }.joinToString { it.transport }}，规则 ${config.routing.rules.size}"
         AppLogStore.add("加载配置：$summary")
         Log.i(TAG, "VPN config: $summary")
-        return json
+        return nativeConfig.toJsonString()
     }
 
     fun onNativeStatus(state: String) {
         Log.i(TAG, "native status: $state")
         AppLogStore.add("native: $state")
+        // Native callbacks may run on a Tokio thread, including during startup.
+        mainHandler.post {
+            if (nativeHandle != 0L) {
+                runCatching { bridge.nativeStats(nativeHandle) }.onSuccess(::refreshNativeStatus)
+            }
+        }
+    }
+
+    private fun refreshNativeStatus(json: String) {
+        val stats = runCatching { JSONObject(json) }.getOrNull() ?: return
+        val state = stats.optString("state")
         val message = when (state) {
             "connected" -> getString(R.string.vpn_status_connected)
-            "error" -> getString(R.string.vpn_status_error)
+            "ready" -> getString(R.string.vpn_status_ready)
+            "proxy_error", "error" -> {
+                val detail = stats.optString("last_error").ifBlank { getString(R.string.vpn_status_error) }
+                getString(R.string.vpn_status_failure_detail, detail)
+            }
             "stopped" -> getString(R.string.vpn_status_idle)
-            else -> state
+            else -> getString(R.string.vpn_status_connecting)
         }
-        publishStatus(running = isRunning, message = message)
+        if (message != latestStatusMessage) {
+            publishStatus(running = nativeHandle != 0L, message = message)
+        }
     }
 
     override fun onRevoke() {
@@ -287,6 +317,7 @@ class PlaneVpnService : VpnService() {
 
     private fun publishStatus(running: Boolean, message: String) {
         isRunning = running
+        latestStatusMessage = message
         AppLogStore.add(message)
         updateForegroundNotification(message)
         sendBroadcast(
@@ -321,6 +352,10 @@ class PlaneVpnService : VpnService() {
     }
 
     companion object {
+        @Volatile
+        var latestStatusMessage: String = "未连接"
+            private set
+
         private const val TAG = "PlaneVpnService"
         private const val CHANNEL_ID = "plane_vpn_status"
         private const val NOTIFICATION_ID = 1001
@@ -354,8 +389,6 @@ class PlaneVpnService : VpnService() {
         private const val TUN_MTU = 1500
         private const val TUN_ADDRESS = "198.19.255.254"
         private const val TUN_PREFIX = 15
-        private const val TUN_ADDRESS_V6 = "fd00::2"
-        private const val TUN_PREFIX_V6 = 128
         private const val FAKE_DNS_SERVER = "198.18.0.1"
     }
 }
