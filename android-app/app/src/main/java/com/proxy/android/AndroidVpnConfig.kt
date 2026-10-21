@@ -45,8 +45,12 @@ data class AndroidVpnConfig(
             if (node.port !in 1..65535) return "节点 ${index + 1} 端口必须在 1-65535"
             if (node.key.isBlank()) return "节点 ${index + 1} 缺少加密密钥"
             if (node.transport !in setOf("http2", "http3")) return "节点 ${index + 1} 协议必须是 HTTP/2 或 HTTP/3"
-            if (!node.cipher.equals(DEFAULT_SUPPORTED_CIPHER, ignoreCase = true)) {
-                return "Android core 当前支持 $DEFAULT_SUPPORTED_CIPHER，节点 ${index + 1} 使用了 ${node.cipher}"
+            val cipher = node.cipher.lowercase(Locale.ROOT)
+            if (cipher !in SUPPORTED_CIPHERS) {
+                return "节点 ${index + 1} 加密方式不支持: ${node.cipher}"
+            }
+            if (cipher.endsWith("-v2") && node.key.toByteArray(Charsets.UTF_8).size != 32) {
+                return "节点 ${index + 1} 的 v2 加密密钥必须是 32 字节"
             }
         }
         if (routing.defaultAction !in setOf("proxy", "direct", "reject")) {
@@ -121,7 +125,7 @@ data class AndroidVpnConfig(
     }
 
     companion object {
-        private const val DEFAULT_SUPPORTED_CIPHER = "chacha20"
+        private val SUPPORTED_CIPHERS = setOf("chacha20", "chacha20-poly1305-v2", "aes-gcm-v2")
         private val SUPPORTED_RULE_TYPES = setOf(
             "domain_pattern",
             "domain_suffix",

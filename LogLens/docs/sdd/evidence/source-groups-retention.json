@@ -1,0 +1,18 @@
+{
+  "test": "io.loglens.storage.SessionStorageTest#expiredGroupSegmentRemovesSourceAssociationsWhileCaptureRemains",
+  "jvm": "IDEA JBR 21.0.6",
+  "groupSegmentRotatedBySize": true,
+  "groupSegmentExpiredByAge": true,
+  "capturedSourceSegmentRetained": true,
+  "sourceRowsEmpty": true,
+  "expiredFlag": true,
+  "targetedClassTests": 7,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "surefireReport": "loglens-storage/target/surefire-reports/TEST-io.loglens.storage.SessionStorageTest.xml",
+  "fullReactorResult": "passed",
+  "fullReactorTestCount": 7,
+  "fullReactorFailures": 0,
+  "fullReactorFinishedAt": "2026-10-13T13:58:13+08:00"
+}

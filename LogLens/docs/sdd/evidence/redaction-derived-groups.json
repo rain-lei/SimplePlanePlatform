@@ -1,0 +1,15 @@
+{
+  "test": "io.loglens.runtime.ProcessingRuntimeTest#pluginDerivedSourceGroupsAreRedactedAndStillQueryable",
+  "jvm": "IDEA JBR 21.0.6",
+  "result": "passed",
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "pluginSentinelValuesAbsentFromAllSessionFiles": true,
+  "redactedSourceLookupReturnsCapturedRow": true,
+  "surefireReport": "loglens-runtime/target/surefire-reports/TEST-io.loglens.runtime.ProcessingRuntimeTest.xml",
+  "fullReactorResult": "passed",
+  "fullReactorTestCount": 5,
+  "fullReactorFailures": 0,
+  "fullReactorFinishedAt": "2026-10-13T13:58:13+08:00"
+}

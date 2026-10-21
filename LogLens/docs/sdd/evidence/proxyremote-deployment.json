@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-18",
+  "artifact": {
+    "repositoryCommit": "8f3939c47deadfec81ed55e1b5bc4444f29b19bb",
+    "agentFile": "loglens-agent.jar",
+    "agentSha256": "4e6841d8c5816812b484e7f13dc0de69165fcb19b994b0b3a938aa98fa17eb58"
+  },
+  "deployment": {
+    "service": "proxy-remote.service",
+    "runtime": "Amazon Corretto 17.0.20",
+    "agentConfig": "systemd service drop-in using JAVA_TOOL_OPTIONS",
+    "agentDirectory": "/home/ec2-user/loglens-monitoring",
+    "dataDirectory": "/home/ec2-user/loglens-data",
+    "webBind": "127.0.0.1:9527",
+    "panelPortExposedPublicly": false
+  },
+  "verification": {
+    "serviceActive": true,
+    "panelListenerPidMatchesServiceMainPid": true,
+    "healthAccepting": true,
+    "outputHealthy": true,
+    "telemetryDropped": 0,
+    "localTunnel": "127.0.0.1:9527 -> server loopback 127.0.0.1:9527",
+    "uiHttpStatus": 200,
+    "uiTitle": "LogLens / 日志工作台",
+    "activeConnectionsAtCheck": 16
+  },
+  "limits": [
+    "The active connection count is a point-in-time observation and changes with live traffic.",
+    "This deployment check did not inspect peer addresses or proxy payloads.",
+    "Production Logback record capture and per-session byte totals were not asserted by this deployment health check; those behaviors have separate SDD test evidence.",
+    "The panel is reachable from the operator workstation only while the SSH tunnel is running."
+  ]
+}

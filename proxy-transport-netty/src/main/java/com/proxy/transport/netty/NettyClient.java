@@ -114,6 +114,11 @@ public class NettyClient implements Client {
         Channel streamChannel = (Channel) f.getNow();
         Deque<ProxyMessage> toFlush;
         synchronized (state) {
+            if (closed.get() || state.failed) {
+                state.pending.clear();
+                streamChannel.close();
+                return;
+            }
             state.channel = streamChannel;
             toFlush = new ArrayDeque<>(state.pending);
             state.pending.clear();
@@ -195,9 +200,12 @@ public class NettyClient implements Client {
     @Override
     public void closeStream(long streamId) {
         StreamState state = streams.remove(streamId);
-        if (state != null && state.channel != null && state.channel.isActive()) {
-            state.channel.close();
-            log.debug("Closed stream for streamId={}", streamId);
+        if (state != null) {
+            synchronized (state) {
+                state.failed = true;
+                state.pending.clear();
+                if (state.channel != null) state.channel.close();
+            }
         }
     }
 

@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * </p>
  */
 class OutboundIntegrationTest {
+    String cipherSuite() { return "none"; }
 
     private static final String HOST = "127.0.0.1";
     private static final long TIMEOUT = 5000;
@@ -74,14 +75,16 @@ class OutboundIntegrationTest {
         serverUrl.addParameter("maxStreams", 100);
         serverUrl.addParameter("readIdleTimeout", 60);
         serverUrl.addParameter("backlog", 128);
-        serverUrl.addParameter("cipher", "none");
+        serverUrl.addParameter("cipher", cipherSuite());
+        serverUrl.addParameter("cipherKey", "0123456789abcdef0123456789abcdef");
 
         Exchanger exchanger = ExtensionLoader.getLoader(Exchanger.class).getDefaultExtension();
         proxyServer = exchanger.bind(serverUrl, dispatchInvoker);
 
         // 创建客户端连接到 Proxy
         URL clientUrl = new URL("proxy", HOST, proxyPort);
-        clientUrl.addParameter("cipher", "none");
+        clientUrl.addParameter("cipher", cipherSuite());
+        clientUrl.addParameter("cipherKey", "0123456789abcdef0123456789abcdef");
         proxyClient = exchanger.connect(clientUrl);
 
         // 注入 streamRegistry 用于接收推送
@@ -165,7 +168,8 @@ class OutboundIntegrationTest {
         Response response = future.get(TIMEOUT, TimeUnit.MILLISECONDS);
 
         // CONNECT 本身立即返回 OK（异步建连）
-        assertTrue(response.isSuccess());
+        // Netty 4.2 下连接失败可能在等待 CONNECT 响应时同步返回；测试重点是失败连接不会留下 session。
+        assertFalse(response.isSuccess(), "Unreachable outbound target should fail CONNECT");
 
         // 等待异步连接失败 → session 被清理
         Thread.sleep(500);
@@ -226,16 +230,31 @@ class OutboundIntegrationTest {
         proxyClient.request(connectMsg, TIMEOUT).get(TIMEOUT, TimeUnit.MILLISECONDS);
         Thread.sleep(200);
 
-        // 关闭 echo server 的 worker group → 强制断开所有已建立连接
-        echoServerWorkerGroup.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS).sync();
-        Thread.sleep(500);
-
-        // 验证目标关闭后服务端 session 已进入 CLOSED 状态
         OutboundSession session =
                 dispatchInvoker.getSessionManager().get(String.valueOf(streamId));
-        assertNotNull(session, "Session entry should still exist before next DATA cleanup");
-        assertEquals(OutboundSession.SessionState.CLOSED, session.getState(),
-                "Session should be CLOSED after target server closes");
+        assertNotNull(session, "CONNECT must have registered a session");
+        EmbeddedChannel browser = createPushCapture(streamId, new LinkedBlockingQueue<>());
+        try {
+            // Target EOF must clean the registry and both sides, without another DATA frame.
+            echoServerWorkerGroup.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS).sync();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while ((browser.isActive() || session.getInboundCtx().channel().isActive()
+                    || proxyClient.getClient().getActiveStreamCount() != 0)
+                    && System.nanoTime() < deadline) {
+                browser.runPendingTasks();
+                Thread.sleep(10);
+            }
+            assertEquals(OutboundSession.SessionState.CLOSED, session.getState());
+            assertNull(dispatchInvoker.getSessionManager().get(String.valueOf(streamId)),
+                    "Closed session must be removed immediately");
+            assertFalse(session.getOutboundChannel().isActive());
+            assertFalse(session.getInboundCtx().channel().isActive());
+            assertFalse(browser.isActive(), "Target EOF must reach the browser");
+            assertFalse(streamRegistry.containsKey(streamId));
+            assertEquals(0, proxyClient.getClient().getActiveStreamCount());
+        } finally {
+            browser.finishAndReleaseAll();
+        }
     }
 
     /**
@@ -297,16 +316,26 @@ class OutboundIntegrationTest {
     // ======================== Helper Methods ========================
 
     private EmbeddedChannel createPushCapture(long streamId, BlockingQueue<byte[]> pushQueue) {
-        EmbeddedChannel channel = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+        // ExchangeHandler.handlePush 使用注册 context 的 writeAndFlush，属于 outbound 事件；
+        // 捕获器必须位于该 context 的前面，不能通过 inbound channelRead 捕获。
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
             @Override
-            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
                 if (msg instanceof ByteBuf) {
                     ByteBuf buf = (ByteBuf) msg;
                     byte[] data = new byte[buf.readableBytes()];
                     buf.readBytes(data);
                     buf.release();
                     pushQueue.offer(data);
+                    promise.setSuccess();
+                } else {
+                    ctx.write(msg, promise);
                 }
+            }
+        }, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                ctx.fireChannelRead(msg);
             }
         });
         streamRegistry.put(streamId, channel.pipeline().lastContext());

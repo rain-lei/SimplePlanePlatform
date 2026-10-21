@@ -37,7 +37,7 @@
 //!   仅当 url 带 `cipher=chacha20`（且 `cipherKey=...`）时才与本模块的 ChaCha20-Poly1305
 //!   二进制兼容。联调时 proxy-remote 必须显式配 ChaCha20。
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -68,7 +68,7 @@ pub trait SocketProtector: Send + Sync {
 
     /// Resolve through a network outside the VPN when the platform can provide
     /// one. Returning None lets callers fall back to the normal system resolver.
-    fn resolve_ipv4(&self, _host: &str) -> Option<Ipv4Addr> {
+    fn resolve_ip(&self, _host: &str) -> Option<IpAddr> {
         None
     }
 
@@ -180,6 +180,12 @@ impl InboundReassembler {
             let ct_len =
                 u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
                     as usize;
+
+            if ct_len > 8 * 1024 * 1024 + 65536 {
+                return Err(CoreError::Protocol(
+                    "Ciphertext length exceeds limit".to_owned(),
+                ));
+            }
 
             if self.cipher_buffer.len() - offset < CIPHER_LENGTH_PREFIX + ct_len {
                 // 本密文块还没收齐，等下一帧。
@@ -358,6 +364,7 @@ impl OutboundConnection {
     }
 
     async fn open_proxy_stream_inner(&mut self, host: &str, port: u16) -> Result<OutboundStream> {
+        let cipher = self.cipher.fresh_session()?;
         // 等待连接就绪（h2 流控 / SETTINGS）。
         let mut send_request = self
             .send_request
@@ -382,7 +389,7 @@ impl OutboundConnection {
         let request_id = self.req_id_gen.next_id();
         let stream_id = next_stream_id();
         let connect_msg = ProxyMessage::connect(request_id, stream_id, host, port);
-        let frame = encode_encrypted_frame(&self.cipher, &connect_msg)?;
+        let frame = encode_encrypted_frame(&cipher, &connect_msg)?;
         send_stream
             .send_data(Bytes::from(frame), false)
             .map_err(|e| CoreError::Protocol(format!("send CONNECT data failed: {e}")))?;
@@ -402,10 +409,10 @@ impl OutboundConnection {
         let mut stream = OutboundStream {
             request_id,
             stream_id,
-            cipher: self.cipher.clone(),
+            cipher: cipher.clone(),
             send_stream,
             recv_stream,
-            reassembler: InboundReassembler::new(self.cipher.clone()),
+            reassembler: InboundReassembler::new(cipher),
             pending_messages: Vec::new(),
         };
 
@@ -514,7 +521,14 @@ impl OutboundStream {
                 Ok(Some(msgs))
             }
             Some(Err(e)) => Err(CoreError::Protocol(format!("h2 recv error: {e}"))),
-            None => Ok(None),
+            None => {
+                if self.reassembler.cipher_buffered_len() != 0
+                    || self.reassembler.buffered_len() != 0
+                {
+                    return Err(CoreError::Protocol("Truncated encrypted stream".to_owned()));
+                }
+                Ok(None)
+            }
         }
     }
 }
@@ -612,6 +626,23 @@ mod tests {
         connect_status: Option<u8>,
         greeting: bool,
     ) -> (OutboundConnection, tokio::task::JoinHandle<()>) {
+        mock_proxy_with_cipher(
+            http_status,
+            connect_status,
+            greeting,
+            "chacha20",
+            b"test-key",
+        )
+        .await
+    }
+
+    async fn mock_proxy_with_cipher(
+        http_status: u16,
+        connect_status: Option<u8>,
+        greeting: bool,
+        suite: &'static str,
+        key: &'static [u8],
+    ) -> (OutboundConnection, tokio::task::JoinHandle<()>) {
         let (client_io, server_io) = tokio::io::duplex(65536);
         let server = tokio::spawn(async move {
             let mut server = h2::server::handshake(server_io).await.unwrap();
@@ -619,7 +650,7 @@ mod tests {
                 let (request, mut respond) = request.unwrap();
                 tokio::spawn(async move {
                     let mut body = request.into_body();
-                    let cipher = test_cipher();
+                    let cipher = Cipher::test_server(suite, key).unwrap();
                     let mut decoder = InboundReassembler::new(cipher.clone());
                     let connect = loop {
                         let chunk = body.data().await.unwrap().unwrap();
@@ -665,7 +696,7 @@ mod tests {
         });
         let client = OutboundConnection::handshake(
             client_io,
-            test_cipher(),
+            Cipher::from_name(suite, key).unwrap(),
             OutboundConfig {
                 server_host: "mock-node".to_string(),
                 server_port: 9090,
@@ -675,6 +706,29 @@ mod tests {
         .await
         .unwrap();
         (client, server)
+    }
+
+    #[tokio::test]
+    async fn http2_v2_sessions_are_independent_per_stream() {
+        for suite in ["chacha20-poly1305-v2", "aes-gcm-v2"] {
+            let (mut connection, server) =
+                mock_proxy_with_cipher(200, Some(200), true, suite, &[0x42; 32]).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut other = connection.clone();
+                let (first, second) = tokio::join!(
+                    connection.open_proxy_stream("one.test", 80),
+                    other.open_proxy_stream("two.test", 80),
+                );
+                for mut stream in [first.unwrap(), second.unwrap()] {
+                    let messages = stream.recv_messages().await.unwrap().unwrap();
+                    assert_eq!(messages[0].data, b"server greeting");
+                    stream.send_disconnect().unwrap();
+                }
+            })
+            .await
+            .expect("v2 HTTP/2 streams stalled");
+            server.abort();
+        }
     }
 
     #[tokio::test]

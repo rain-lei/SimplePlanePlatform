@@ -87,6 +87,11 @@ public class URL {
         return this;
     }
 
+    public URL addParameter(String key, long value) {
+        parameters.put(key, String.valueOf(value));
+        return this;
+    }
+
     // ==================== Getters & Setters ====================
 
     public String getProtocol() {
@@ -148,7 +153,8 @@ public class URL {
             boolean first = true;
             for (Map.Entry<String, String> entry : parameters.entrySet()) {
                 if (!first) sb.append("&");
-                sb.append(entry.getKey()).append("=").append(entry.getValue());
+                sb.append(entry.getKey()).append("=")
+                        .append("cipherKey".equals(entry.getKey()) ? "[REDACTED]" : entry.getValue());
                 first = false;
             }
         }

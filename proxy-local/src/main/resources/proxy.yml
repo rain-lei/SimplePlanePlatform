@@ -1,7 +1,24 @@
 localPort: 1080
 remoteServers:
-  - host: 54.234.196.30
+  - host: 54.172.101.190
     port: 9090
+    transport: http3
+    http3:
+      serverName: 54.172.101.190
+      caFile: http3-remote-ca.crt
+      certificatePin: ""
+      handshakeTimeoutMs: 5000
+      idleTimeoutMs: 60000
+      maxStreams: 1000
+      initialConnectionWindow: 16777216
+      initialStreamWindow: 1048576
+      maxProxyMessageBytes: 8388608
+      streamPendingHardLimit: 4194304
+      connectionPendingHardLimit: 67108864
+      writeBufferLowWaterMark: 262144
+      writeBufferHighWaterMark: 1048576
+    # 新连接建议两端一起使用 chacha20-poly1305-v2 / aes-gcm-v2 + 32字节随机密钥。
+    # 此处 chacha20 仅为现有远程服务保留兼容，不能单独切换一端。
     cipher: chacha20
     cipherKey: your-cipher-key
     ssl: false
@@ -104,6 +121,10 @@ route:
     - "*.xuexitong.com"
     - 127.0.0.1
     - localhost
+  directProviders:
+    - classpath:routing/providers/direct-list.txt
+  proxyProviders:
+    - classpath:routing/providers/proxy-list.txt
 systemProxy:
   enabled: false
   host: 127.0.0.1

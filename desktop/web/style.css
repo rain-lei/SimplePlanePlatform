@@ -1,4 +1,5 @@
 /* SimplePlane Desktop — Full Dark Theme */
+.form-row[hidden] { display: none; }
 :root {
   --bg-primary: #0f1117;
   --bg-secondary: #1a1d27;

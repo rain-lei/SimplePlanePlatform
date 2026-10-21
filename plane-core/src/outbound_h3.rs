@@ -318,6 +318,7 @@ impl OutboundConnection {
     }
 
     async fn open_proxy_stream_inner(&mut self, host: &str, port: u16) -> Result<OutboundStream> {
+        let cipher = self.cipher.fresh_session()?;
         let authority = format_authority(&self.config.server_host, self.config.server_port);
         let uri = format!("https://{authority}/proxy");
         let request = http::Request::builder()
@@ -361,7 +362,7 @@ impl OutboundConnection {
         // across QUIC reconnects within this process.
         let stream_id = next_stream_id();
         let connect_msg = ProxyMessage::connect(request_id, stream_id, host, port);
-        let frame = encode_encrypted_frame(&self.cipher, &connect_msg)?;
+        let frame = encode_encrypted_frame(&cipher, &connect_msg)?;
         stream
             .send_data(Bytes::from(frame))
             .await
@@ -372,9 +373,9 @@ impl OutboundConnection {
             stream_id,
             target_host: host.to_string(),
             target_port: port,
-            cipher: self.cipher.clone(),
+            cipher: cipher.clone(),
             stream,
-            reassembler: InboundReassembler::new(self.cipher.clone()),
+            reassembler: InboundReassembler::new(cipher),
             health: Arc::clone(&self.health),
             pending_messages: Vec::new(),
             // Dropping the last H3 SendRequest actively closes the connection,
@@ -609,6 +610,15 @@ pub(crate) mod tests {
         http_status: u16,
         ack_status: Option<u8>,
     ) -> (SocketAddr, String, tokio::task::JoinHandle<()>) {
+        mock_proxy_with_cipher(http_status, ack_status, "chacha20", b"test-key").await
+    }
+
+    async fn mock_proxy_with_cipher(
+        http_status: u16,
+        ack_status: Option<u8>,
+        suite: &'static str,
+        secret: &'static [u8],
+    ) -> (SocketAddr, String, tokio::task::JoinHandle<()>) {
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let ca_pem = certificate.cert.pem();
         let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der());
@@ -642,7 +652,7 @@ pub(crate) mod tests {
                         let _ = stream.finish().await;
                         return;
                     }
-                    let cipher = Cipher::new(b"test-key").unwrap();
+                    let cipher = Cipher::test_server(suite, secret).unwrap();
                     let mut reassembler = InboundReassembler::new(cipher.clone());
                     while let Ok(Some(mut chunk)) = stream.recv_data().await {
                         let bytes = chunk.copy_to_bytes(chunk.remaining());
@@ -730,6 +740,57 @@ pub(crate) mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn http3_v2_sessions_are_independent_per_stream() {
+        for suite in ["chacha20-poly1305-v2", "aes-gcm-v2"] {
+            let (addr, ca_pem, server) =
+                mock_proxy_with_cipher(200, Some(200), suite, &[0x42; 32]).await;
+            let mut connection = OutboundConnection::connect(
+                addr,
+                &NoopProtector,
+                Cipher::from_name(suite, &[0x42; 32]).unwrap(),
+                OutboundConfig {
+                    server_host: "localhost".into(),
+                    server_port: addr.port(),
+                    server_name: "localhost".into(),
+                    ca_pem,
+                    tls: true,
+                },
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut other = connection.clone();
+                let (first, second) = tokio::join!(
+                    connection.open_proxy_stream("one.test", 80),
+                    other.open_proxy_stream("two.test", 80),
+                );
+                for mut stream in [first.unwrap(), second.unwrap()] {
+                    let mut greeting = Vec::new();
+                    while greeting.len() < 8 {
+                        for message in stream.recv_messages().await.unwrap().unwrap() {
+                            greeting.extend(message.data);
+                        }
+                    }
+                    assert_eq!(greeting, b"greeting");
+                    let payload = vec![0x7a; 32769];
+                    stream.send_payload(&payload).await.unwrap();
+                    let mut echoed = Vec::new();
+                    while echoed.len() < payload.len() {
+                        for message in stream.recv_messages().await.unwrap().unwrap() {
+                            echoed.extend(message.data);
+                        }
+                    }
+                    assert_eq!(echoed, payload);
+                    stream.send_disconnect().await.unwrap();
+                }
+            })
+            .await
+            .expect("v2 HTTP/3 streams stalled");
+            server.abort();
+        }
     }
 
     #[tokio::test]

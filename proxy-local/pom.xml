@@ -17,6 +17,18 @@
     <dependencies>
         <dependency>
             <groupId>com.proxy</groupId>
+            <artifactId>proxy-remote</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk15on</artifactId>
+            <version>${bouncycastle.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.proxy</groupId>
             <artifactId>proxy-common</artifactId>
         </dependency>
         <dependency>
@@ -26,6 +38,10 @@
         <dependency>
             <groupId>com.proxy</groupId>
             <artifactId>proxy-transport-netty</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.proxy</groupId>
+            <artifactId>proxy-transport-http3</artifactId>
         </dependency>
         <dependency>
             <groupId>com.proxy</groupId>

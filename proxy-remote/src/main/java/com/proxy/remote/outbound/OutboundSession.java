@@ -41,6 +41,11 @@ public class OutboundSession {
     private final CompletableFuture<Void> activeFuture = new CompletableFuture<>();
 
     private volatile Channel outboundChannel;
+    private volatile Runnable closeListener = () -> { };
+
+    public void setCloseListener(Runnable listener) {
+        closeListener = listener;
+    }
 
     /**
      * @param inboundCtx  客户端 Stream 的 ChannelHandlerContext，用于回写数据
@@ -60,12 +65,18 @@ public class OutboundSession {
     /**
      * 设置出站 Channel（连接成功后调用），状态迁移到 ACTIVE
      */
-    public void setOutboundChannel(Channel channel) {
+    public synchronized boolean setOutboundChannel(Channel channel) {
+        if (state.get() != SessionState.CONNECTING || !inboundCtx.channel().isActive()) {
+            channel.close();
+            close();
+            return false;
+        }
         this.outboundChannel = channel;
         if (state.compareAndSet(SessionState.CONNECTING, SessionState.ACTIVE)) {
             activeFuture.complete(null);
             log.debug("OutboundSession active: sessionKey={}, target={}:{}", sessionKey, targetHost, targetPort);
         }
+        return true;
     }
 
     /**
@@ -83,11 +94,13 @@ public class OutboundSession {
             return;
         }
         if (outboundChannel != null && outboundChannel.isActive()) {
-            outboundChannel.writeAndFlush(io.netty.buffer.Unpooled.wrappedBuffer(data));
+            outboundChannel.writeAndFlush(io.netty.buffer.Unpooled.wrappedBuffer(data)).addListener(f -> {
+                if (!f.isSuccess()) closeFromTarget();
+            });
         } else {
             // outbound 已断开，关闭 session 避免无效的后续调用
             log.info("Outbound channel inactive, closing session: sessionKey={}", sessionKey);
-            close();
+            closeFromTarget();
         }
     }
 
@@ -113,7 +126,12 @@ public class OutboundSession {
                     .streamId(rawStreamId)
                     .data(data)
                     .build();
-            inboundCtx.writeAndFlush(message);
+            inboundCtx.writeAndFlush(message).addListener(f -> {
+                if (!f.isSuccess()) {
+                    close();
+                    inboundCtx.close();
+                }
+            });
             log.debug("writeBack: sessionKey={}, dataLen={}", sessionKey, data.length);
         } else {
             // 客户端 stream 已断开，主动关闭 outbound 连接，停止从目标网站接收数据
@@ -151,7 +169,7 @@ public class OutboundSession {
         }
         try {
             activeFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
-            return true;
+            return state.get() == SessionState.ACTIVE;
         } catch (Exception e) {
             log.warn("awaitActive timeout: sessionKey={}, target={}:{}", sessionKey, targetHost, targetPort);
             return false;
@@ -162,16 +180,42 @@ public class OutboundSession {
      * 关闭会话，释放出站连接
      */
     public void close() {
+        closeSession();
+    }
+
+    /** Unsolicited target EOF/error: flush prior DATA before ending the tunnel. */
+    public void closeFromTarget() {
+        if (!closeSession()) return;
+        if (inboundCtx.channel().isActive()) {
+            ProxyMessage end = ProxyMessage.builder().type(ProxyMessage.MessageType.DISCONNECT)
+                    .streamId(rawStreamId).host(targetHost).port(targetPort).build();
+            inboundCtx.writeAndFlush(end).addListener(write -> {
+                if (!write.isSuccess()) {
+                    inboundCtx.close();
+                } else if (inboundCtx.channel() instanceof io.netty.channel.socket.DuplexChannel) {
+                    ((io.netty.channel.socket.DuplexChannel) inboundCtx.channel()).shutdownOutput();
+                } else {
+                    inboundCtx.close();
+                }
+            });
+        } else {
+            inboundCtx.close();
+        }
+    }
+
+    private synchronized boolean closeSession() {
         if (state.getAndSet(SessionState.CLOSED) == SessionState.CLOSED) {
-            return; // 已关闭，幂等
+            return false;
         }
         // 唤醒可能等待的 awaitActive
-        activeFuture.complete(null);
+        activeFuture.completeExceptionally(new java.nio.channels.ClosedChannelException());
 
         if (outboundChannel != null && outboundChannel.isActive()) {
             outboundChannel.close();
             log.debug("Outbound channel closed: sessionKey={}, target={}:{}", sessionKey, targetHost, targetPort);
         }
+        closeListener.run();
+        return true;
     }
 
     // ---- Getters ----

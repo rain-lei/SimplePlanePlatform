@@ -1,0 +1,6 @@
+# 仅在需要从其他机器接入 Proxy Remote 时叠加此文件。
+# LogLens 面板仍只发布到宿主机 loopback；公网面板访问须使用 SSH 隧道。
+services:
+  proxy-remote:
+    ports:
+      - "9090:9090/tcp"

@@ -37,7 +37,7 @@ public class CipherEncodeHandler extends MessageToMessageEncoder<Http2DataFrame>
      * 默认构造 —— 通过 SPI 加载默认 Cipher 实现
      */
     public CipherEncodeHandler() {
-        this.cipher = ExtensionLoader.getLoader(Cipher.class).getDefaultExtension();
+        this.cipher = ExtensionLoader.getLoader(Cipher.class).newDefaultExtension();
     }
 
     /**

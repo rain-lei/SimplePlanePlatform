@@ -2,6 +2,8 @@
    SimplePlane Dashboard — Dark theme
    ============================================================ */
 
+.field-group[hidden] { display: none; }
+
 :root {
   --bg:            oklch(0.100 0 0);
   --surface:       oklch(0.135 0.002 260);

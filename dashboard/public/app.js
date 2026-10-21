@@ -155,6 +155,11 @@ const App = (function () {
 
   // ---- Status ----
   async function loadStatus() {
+    const node = await api('/nodes/status');
+    const target = $('#nodeApplyStatus');
+    if (target) target.textContent = !node.ok ? node.error : node.data.error ||
+      (node.data.savedRevision !== node.data.appliedRevision ? '配置已保存，尚未应用' :
+      `当前生效节点：${node.data.currentNodeId} · ${({ idle: '等待建连', connecting: '连接中', available: '连接可用', unavailable: '节点不可用', stopped: '已停止' })[node.data.nodeStatus] || '状态未知'} · 活跃流：${node.data.activeStreams} · 配置已应用`);
     const res = await api('/status');
     if (res.ok) {
       updateServiceUI('proxy-local', res.services['proxy-local']);
@@ -177,6 +182,11 @@ const App = (function () {
     const labels = { running: '运行中', 'running (external)': '运行中(外部)', starting: '启动中', stopped: '已停止' };
     label.textContent = labels[info.status] || info.status;
     card.className = 'service-card ' + (info.status.includes('running') ? 'card-running' : info.status === 'starting' ? 'card-starting' : '');
+    if (name === 'proxy-local') {
+      const transport = localConfig?.remoteServers?.[0]?.transport || 'http2';
+      const transportEl = $('#transport-proxy-local');
+      if (transportEl) transportEl.textContent = `transport: ${transport}`;
+    }
 
     const uptimeEl = $(`#uptime-${name}`);
     if (uptimeEl) uptimeEl.textContent = info.uptime > 0 ? `运行: ${formatUptime(info.uptime)}` : '';
@@ -391,6 +401,8 @@ const App = (function () {
     setVal('#connectionsPerNode', c.connectionsPerNode);
     setChecked('#httpProxyEnabled', c.httpProxyEnabled);
     renderServerCards(c.remoteServers || []);
+    $('#cluster').closest('.field-group').hidden = (c.remoteServers || []).length > 0
+      && c.remoteServers.every(node => node.transport === 'http3');
     if (c.route) {
       setVal('#defaultRoute', c.route.defaultRoute);
       $('#proxyList').value = (c.route.proxyList || []).join('\n');
@@ -403,21 +415,36 @@ const App = (function () {
   function renderServerCards(servers) {
     const container = $('#remoteServers'); container.innerHTML = '';
     servers.forEach((srv, i) => container.appendChild(createServerCard(srv, i)));
+    if (!$('[data-key="selected"]:checked', container) && $('[data-key="selected"]', container)) {
+      $('[data-key="selected"]', container).checked = true;
+    }
   }
 
   function createServerCard(srv, index) {
     const card = document.createElement('div');
     card.className = 'server-card';
+    card.dataset.nodeId = srv.id || (crypto.randomUUID ? crypto.randomUUID() : `node-${Date.now()}-${index}`);
+    card.nodeConfig = { ...srv };
     card.innerHTML = `
       <div class="server-card-header">
+        <label><input type="radio" name="selected-node" data-key="selected" ${localConfig?.nodeSelection?.selectedNodeId === card.dataset.nodeId || (!localConfig?.nodeSelection && index === 0) ? 'checked' : ''}> 使用此节点</label>
         <span class="server-card-title"><span class="server-index">#${index + 1}</span> ${esc(srv.host || '?')}:${srv.port || '?'}</span>
         <button class="btn btn-danger btn-sm btn-remove" title="删除">×</button>
       </div>
       <div class="server-fields">
+        <div class="server-field"><label>节点名称</label><input class="input" value="${escAttr(srv.name || '')}" data-key="name"></div>
         <div class="server-field"><label>Host</label><input class="input" value="${escAttr(srv.host || '')}" data-key="host"></div>
         <div class="server-field"><label>Port</label><input class="input" type="number" value="${srv.port || 9090}" data-key="port"></div>
+        <div class="server-field"><label>Transport</label>
+          <select class="select" data-key="transport">
+            <option value="http3" ${srv.transport === 'http3' ? 'selected' : ''}>HTTP/3 QUIC</option>
+            <option value="http2" ${(!srv.transport || srv.transport === 'http2') ? 'selected' : ''}>HTTP/2</option>
+          </select>
+        </div>
         <div class="server-field"><label>Cipher</label>
           <select class="select" data-key="cipher">
+            <option value="chacha20-poly1305-v2" ${srv.cipher === 'chacha20-poly1305-v2' ? 'selected' : ''}>chacha20-poly1305-v2</option>
+            <option value="aes-gcm-v2" ${srv.cipher === 'aes-gcm-v2' ? 'selected' : ''}>aes-gcm-v2</option>
             <option value="none" ${srv.cipher === 'none' ? 'selected' : ''}>none</option>
             <option value="aes-gcm" ${srv.cipher === 'aes-gcm' ? 'selected' : ''}>aes-gcm</option>
             <option value="chacha20" ${srv.cipher === 'chacha20' ? 'selected' : ''}>chacha20</option>
@@ -430,7 +457,13 @@ const App = (function () {
         </div>
       </div>`;
     $$('input, select', card).forEach(el => { el.addEventListener('input', markChanged); el.addEventListener('change', markChanged); });
-    $('.btn-remove', card).addEventListener('click', () => { card.remove(); collectAndMark(); });
+    $('.btn-remove', card).addEventListener('click', () => {
+      card.remove();
+      if (!$('#remoteServers [data-key="selected"]:checked') && $('#remoteServers [data-key="selected"]')) {
+        $('#remoteServers [data-key="selected"]').checked = true;
+      }
+      collectAndMark();
+    });
     return card;
   }
 
@@ -537,16 +570,32 @@ const App = (function () {
 
   function collectServers() {
     const servers = [];
-    $$('.server-card', $('#remoteServers')).forEach(card => {
+    $$('.server-card', $('#remoteServers')).forEach((card, index) => {
+      const previous = card.nodeConfig || {};
       servers.push({
+        ...previous,
+        id: card.dataset.nodeId,
+        name: val($('[data-key="name"]', card)),
         host: val($('[data-key="host"]', card)),
         port: parseInt(val($('[data-key="port"]', card))) || 9090,
+        transport: val($('[data-key="transport"]', card)) || 'http2',
         cipher: val($('[data-key="cipher"]', card)),
         cipherKey: val($('[data-key="cipherKey"]', card)),
         ssl: $('[data-key="ssl"]', card).checked,
       });
     });
-    if (localConfig) localConfig.remoteServers = servers;
+    if (localConfig) {
+      localConfig.remoteServers = servers;
+      if (servers.length && servers.every(node => node.transport === 'http3')) {
+        localConfig.connectionsPerNode = 1;
+        const selected = $$('.server-card', $('#remoteServers')).find(card => $('[data-key="selected"]', card).checked);
+        localConfig.nodeSelection = { mode: 'manual', selectedNodeId: selected?.dataset.nodeId || '' };
+        $('#cluster').closest('.field-group').hidden = true;
+      } else {
+        delete localConfig.nodeSelection;
+        $('#cluster').closest('.field-group').hidden = false;
+      }
+    }
   }
 
   function collectAndMark() { collectServers(); markChanged(); }
@@ -574,7 +623,7 @@ const App = (function () {
     $('#btnSave').addEventListener('click', saveAll);
     $('#btnAddServer').addEventListener('click', () => {
       const idx = $$('.server-card', $('#remoteServers')).length;
-      $('#remoteServers').appendChild(createServerCard({ host: '', port: 9090, cipher: 'none', cipherKey: '', ssl: false }, idx));
+      $('#remoteServers').appendChild(createServerCard({ host: '', port: 9090, transport: 'http3', cipher: 'none', cipherKey: '', ssl: false }, idx));
       markChanged();
     });
     $('#sidebarToggle').addEventListener('click', () => $('#sidebar').classList.toggle('open'));

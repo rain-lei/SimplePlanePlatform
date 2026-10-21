@@ -1,5 +1,22 @@
 # SimplePlanePlatform
 
+桌面安装包用户请先阅读 [桌面端使用说明与故障排查](docs/桌面端使用说明与故障排查.md)。
+
+加密层新增 `chacha20-poly1305-v2` 与 `aes-gcm-v2`：使用标准 AEAD、认证记录头、HKDF 派生密钥及独立 stream 状态。两端必须选择同名套件，v2 的共享密钥须恰为 32 字节；保留原有 `Cipher` SPI 和传输分帧。旧 `chacha20` 存在密钥流重叠风险，仅为迁移保留兼容实现，不能把它视为标准 ChaCha20-Poly1305。配置、迁移边界和测试方法见 [加密 v2 规范](docs/design/crypto-v2.md) 与 [验证报告](docs/design/crypto-v2-validation.md)。
+
+## HTTP/3 / QUIC 传输
+
+项目支持基于 Netty QUIC 的 HTTP/3 传输模式。配置远程节点时将 `transport` 设置为 `http3`，即可使用 UDP/QUIC 建立加密隧道；每个逻辑 `streamId` 映射到独立的 HTTP/3 Stream，以避免 TCP 单连接级别的队头阻塞。
+
+HTTP/3 支持配置多个节点并手动切换：每条流固定具体连接，切换关闭旧节点的代理流；Web 与桌面端区分配置保存和运行时应用。配置、迁移边界与验收测试见 [HTTP/3 多节点手动切换（P1/P2）](docs/design/http3-node-selection-p1-p2.md)。自动故障切换留待 P3。
+
+需要注意：HTTP/3 Stream 解决的是跨 Stream 的有序交付阻塞，但同一条 QUIC 连接上的所有 Stream 仍共享连接级拥塞窗口、流量控制额度和发送缓冲区。因此丢包或大流量 Stream 仍可能影响其他 Stream 的吞吐，跨流公平调度目前列为后续优化项。
+
+相关设计文档：
+
+- [HTTP/3 / QUIC SPI 设计](docs/design/http3-quic-spi-v1-design.md)
+- [跨流公平性与连接级拥塞窗口待解决问题](docs/HTTP3-QUIC跨流公平性与连接级拥塞窗口待解决.md)
+
 基于 Dubbo 微内核思想设计的高性能加密隧道代理框架，支持 SOCKS5/HTTP CONNECT 代理模式和 TUN 全局透明代理模式，并提供基于系统 VpnService 的 Android 客户端。全链路 SPI 可插拔，集群容错、负载均衡、加密算法、传输层实现均可独立扩展替换。
 
 ## 项目定位
@@ -88,10 +105,11 @@ SimplePlanePlatform/
 ├── proxy-common            SPI 内核：接口定义、ExtensionLoader、注解体系、数据模型
 ├── proxy-exchange          交换层：请求-响应语义（RequestId + Future 映射）
 ├── proxy-transport-netty   传输层：Netty HTTP/2 多路复用、编解码、心跳
-├── proxy-crypto            加密层：4 种可插拔 AEAD 加密实现
+├── proxy-crypto            加密层：版本化 AEAD 套件及旧协议兼容实现
 ├── proxy-cluster           集群层：4 种容错策略 + 4 种负载均衡 + 6 个 Filter
 ├── proxy-local             本地客户端：SOCKS5/HTTP CONNECT 双协议、路由分流、系统代理
 ├── proxy-remote            远程服务端：请求分发、出站连接管理、nginx 部署脚本
+├── LogLens                 服务端可观测性：Byte Buddy Agent、日志历史与 Proxy Remote 连接监控
 ├── tun-adapter             TUN 透明代理：Rust 实现，smoltcp 协议栈 + FakeDNS + 域名路由
 ├── plane-core              Android 数据面：Rust JNI 库（libplane_core.so），用户态栈 + FakeDNS + 出站加密隧道
 ├── android-app             Android 客户端：Kotlin VpnService + JNI 桥接，gradle 构建 APK
@@ -102,6 +120,24 @@ SimplePlanePlatform/
 ├── start-tun.bat           Windows 双击启动器（自动提权）
 └── restore-dns.sh          TUN 异常退出后的 DNS 恢复脚本 (macOS)
 ```
+
+## 服务端观测面板（LogLens）
+
+仓库内的 `LogLens/` 是独立的 Java Agent 子项目，用于观测运行中的 Proxy Remote 服务。它通过 Byte Buddy 在服务端 JVM 内采集物理连接、逻辑会话、Stream ID、目标地址、会话状态和上下行字节数，并将连接遥测与 Logback 日志历史放进同一个 Web 面板。接入使用 premain Agent，不需要修改 SimplePlane 业务源码或增加编译期依赖。
+
+此面板与上面的 `dashboard/` 用途不同：`dashboard/` 管理本机客户端和 TUN 启停；LogLens 用于查看远端服务进程的连接、会话、流量和日志。代理 payload 不会被读取、解密或保存；socket peer 地址也不代表用户账号。
+
+Proxy Remote 监控要求服务 JVM 使用 Java 17 或更高版本。Web 面板默认只监听服务器 loopback，不应直接向公网开放。当前服务已通过 systemd Agent 接入；运维工作站通过 SSH 隧道访问：
+
+```powershell
+ssh -i <key.pem> -N -L 9527:127.0.0.1:9527 ec2-user@<server>
+```
+
+隧道运行后浏览器打开 [http://127.0.0.1:9527](http://127.0.0.1:9527)。本地端口和服务端面板端口需保持一致，以通过 Host/Origin 本地请求校验。活动连接数随线上流量变化；没有当前连接时，列表为空属于正常状态。
+
+详细能力、配置、systemd 部署与数据边界见 [LogLens 使用说明](LogLens/README.md)、[Proxy Remote 监控部署指南](LogLens/docs/proxy-remote-monitoring.md) 和 [脱敏部署验证记录](LogLens/docs/sdd/verification.md#proxy-remote-实际-systemd-部署与本地面板验收2026-10-18)。LogLens 的基础 SDD 审计仍有开放项，不能把专项连接监控验收等同为整个子项目全部验收完成。
+
+Docker 部署也已集成 LogLens：Proxy Remote 镜像构建并注入 Agent，运行时统一使用 Java 17；JSONL/SQLite 历史写入 `loglens-data/`。面板仍绑定容器 loopback，由 relay 仅发布到宿主机 `127.0.0.1:9527`，远程查看继续使用上面的 SSH 隧道。详细端口边界、配置和可选的远程 9090 发布见 [Docker 部署说明](docs/docker部署说明.md)。
 
 ## 快速开始
 
@@ -725,7 +761,7 @@ docker compose logs -f          # 查看日志
 docker compose down             # 停止
 ```
 
-容器模式下 proxy-local 的 1080 端口映射到宿主机，通过服务名 `proxy-remote` 连接服务端。加密配置见 `docker/proxy.yml` 和 `docker/remote.yml`。
+容器模式下，Proxy Remote 与 LogLens Agent 在同一个 Java 17 JVM 中运行；LogLens Web 保持 loopback 绑定，通过 relay 发布到宿主机 `127.0.0.1:9527`，历史数据保存在 `loglens-data/`。proxy-local 通过 compose 服务名连接 Proxy Remote，宿主机代理仅监听 `127.0.0.1:1080`。默认不向公网发布服务端 9090；确需外部客户端连接时使用 `docker-compose.remote-public.yml` 覆盖配置，并限制防火墙来源。面板远程访问使用 SSH 隧道。完整说明见 [Docker 部署说明](docs/docker部署说明.md)。
 
 ## 开启加密
 

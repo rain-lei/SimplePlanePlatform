@@ -1,0 +1,21 @@
+{
+  "test": "io.loglens.runtime.RuntimeWebTest#storageInitializationFailureClosesEveryPluginAndPreservesStartupFailure",
+  "jvm": "IDEA JBR 21.0.6",
+  "failureStage": "SessionStorage session directory creation after plugin assembly",
+  "pluginLoadedFromServiceJar": true,
+  "nodeCloseAttempted": true,
+  "nodeCloseFailureSuppressedOnStartupFailure": true,
+  "originalStartupFailurePreserved": true,
+  "pluginClassloaderReleased": true,
+  "sessionDirectoryCreated": false,
+  "targetedClassTests": 3,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "fullReactorTests": 78,
+  "fullReactorFailures": 0,
+  "fullReactorErrors": 0,
+  "fullReactorSkipped": 0,
+  "fullReactorFinishedAt": "2026-10-13T15:45:31+08:00",
+  "surefireReport": "loglens-runtime/target/surefire-reports/TEST-io.loglens.runtime.RuntimeWebTest.xml"
+}

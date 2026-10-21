@@ -88,6 +88,11 @@ public class DefaultFuture extends CompletableFuture<Response> {
             }
         }, timeoutMs, TimeUnit.MILLISECONDS);
 
+        future.whenComplete((response, error) -> {
+            FUTURES.remove(requestId, future);
+            if (future.timeoutTask != null) future.timeoutTask.cancel();
+        });
+
         return future;
     }
 

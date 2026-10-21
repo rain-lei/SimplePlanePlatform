@@ -74,10 +74,10 @@ class NativeBridge(private val vpn: PlaneVpnService? = null) {
             .getOrDefault(false)
     }
 
-    fun resolveIpv4(host: String): String? {
+    fun resolveIp(host: String): String? {
         val service = vpn ?: return null
-        return runCatching { service.resolveIpv4OutsideVpn(host) }
-            .onFailure { Log.w(TAG, "resolveIpv4($host) failed", it) }
+        return runCatching { service.resolveIpOutsideVpn(host) }
+            .onFailure { Log.w(TAG, "resolveIp($host) failed", it) }
             .getOrNull()
     }
 

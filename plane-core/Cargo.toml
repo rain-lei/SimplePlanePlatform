@@ -38,12 +38,14 @@ hickory-proto = "0.24" # DNS 报文解析/编码
 smoltcp = { version = "0.11", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-dns"] }
 
 # A5 出站层：与 Java proxy-remote 二进制兼容的加密 HTTP/2 客户端。
-# ⚠️ 必须用 chacha20（流密码引擎）+ poly1305（裸 MAC），严禁用聚合的 chacha20poly1305 crate，
-# 后者按 RFC 8439 做 padding/长度尾块，与 Java 的非标准实现（见 ChaCha20Cipher.java）不兼容。
+# chacha20 + poly1305 仅保留旧协议兼容；v2 必须用完整标准 AEAD，不复用旧实现。
 chacha20 = "0.9"  # ChaCha20 流密码（IETF/RFC7539 变体，对齐 BouncyCastle ChaCha7539Engine）
 poly1305 = "0.8"  # 裸 Poly1305 MAC（仅对密文计算，无 AAD/无 padding/无长度尾块）
 sha2 = "0.10"     # key.len()!=32 时 SHA-256 派生 32 字节密钥（对齐 Java）
 rand = "0.8"      # 随机 nonce 生成
+chacha20poly1305 = "0.10.1" # RFC 8439 AEAD (v2 only).
+aes-gcm = "0.10.3"
+hkdf = "0.12.4"
 # HTTP/2 出站（h2 客户端）+ 字节缓冲 + 头部类型
 h2 = "0.4"
 h3 = "0.0.8"

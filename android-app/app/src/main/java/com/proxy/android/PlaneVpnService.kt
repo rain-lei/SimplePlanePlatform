@@ -163,18 +163,17 @@ class PlaneVpnService : VpnService() {
     }
 
     /** Resolves through one physical network, never through the VPN DNS path. */
-    fun resolveIpv4OutsideVpn(host: String): String? {
+    fun resolveIpOutsideVpn(host: String): String? {
         val network = findUnderlyingNetwork() ?: run {
-            Log.w(TAG, "resolveIpv4OutsideVpn($host): no non-VPN network")
+            Log.w(TAG, "resolveIpOutsideVpn($host): no non-VPN network")
             return null
         }
         return runCatching {
-            network.getAllByName(host)
-                .filterIsInstance<Inet4Address>()
-                .firstOrNull()
+            val addresses = network.getAllByName(host)
+            (addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull())
                 ?.hostAddress
         }.onFailure {
-            Log.w(TAG, "resolveIpv4OutsideVpn($host) on $network failed", it)
+            Log.w(TAG, "resolveIpOutsideVpn($host) on $network failed", it)
         }.getOrNull()
     }
 

@@ -1,0 +1,52 @@
+{
+  "agent": "LogLens packaged premain agent",
+  "server": "SimplePlane ProxyRemoteServer using existing target/classes; no business source modified",
+  "runtimes": [
+    {
+      "name": "Corretto 17.0.14",
+      "loopbackClients": 100,
+      "connectedEvents": 100,
+      "disconnectedEvents": 100,
+      "connectCloseElapsedMillis": 45,
+      "sessionComplete": true,
+      "payloadFieldsPresent": false
+    },
+    {
+      "name": "JBR 21",
+      "loopbackClients": 100,
+      "connectedEvents": 100,
+      "disconnectedEvents": 100,
+      "connectCloseElapsedMillis": 48,
+      "sessionComplete": true,
+      "payloadFieldsPresent": false
+    }
+  ],
+  "outboundSession": {
+    "runtime": "Corretto 17.0.14 and JBR 21",
+    "actualClasses": [
+      "com.proxy.remote.outbound.SessionManager",
+      "com.proxy.remote.outbound.OutboundSession"
+    ],
+    "eventKinds": [
+      "SESSION_OPENED",
+      "SESSION_ACTIVE",
+      "SESSION_CLOSED"
+    ],
+    "connectionId": "embedded",
+    "uplinkBytes": 12,
+    "downlinkBytes": 7,
+    "sessionComplete": true
+  },
+  "compatibilityGuard": {
+    "premainClassMajorVersion": 52,
+    "compiledWith": "--release 8",
+    "java8Default": "reports COMPATIBILITY_ERROR and disables monitoring",
+    "java8Strict": "fails initialization",
+    "actualJava8JvmAvailable": false
+  },
+  "limitations": [
+    "connect/close test does not perform a complete proxy protocol exchange",
+    "100-client timing is a smoke check, not a performance benchmark",
+    "no Java 8 JVM was available"
+  ]
+}

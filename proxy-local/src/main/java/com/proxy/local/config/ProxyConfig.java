@@ -24,6 +24,20 @@ public class ProxyConfig {
      * 远程代理服务器列表
      */
     private List<RemoteServer> remoteServers = new ArrayList<>();
+    private NodeSelection nodeSelection;
+
+    /** P2 supports explicit manual selection. Automatic failover is a later phase. */
+    public static class NodeSelection {
+        private String mode = "manual";
+        private String selectedNodeId;
+        public String getMode() { return mode; }
+        public void setMode(String value) { mode = value; }
+        public String getSelectedNodeId() { return selectedNodeId; }
+        public void setSelectedNodeId(String value) { selectedNodeId = value; }
+    }
+
+    public NodeSelection getNodeSelection() { return nodeSelection; }
+    public void setNodeSelection(NodeSelection value) { nodeSelection = value; }
 
     /**
      * 集群容错策略（failover / failfast / forking / failback）
@@ -98,6 +112,30 @@ public class ProxyConfig {
         private String defaultRoute = "direct";
         private List<String> proxyList = new ArrayList<>();
         private List<String> directList = new ArrayList<>();
+        private List<String> directProviders = new ArrayList<>();
+        private List<String> proxyProviders = new ArrayList<>();
+        private List<RouteEntry> rules = new ArrayList<>();
+        private List<String> systemDirectList = new ArrayList<>();
+
+        /** 新版 first-match-wins 路由规则。旧列表继续保留用于兼容已有 proxy.yml。 */
+        public static class RouteEntry {
+            private String id;
+            private String type;
+            private String value;
+            private String action;
+            private int priority;
+
+            public String getId() { return id; }
+            public void setId(String id) { this.id = id; }
+            public String getType() { return type; }
+            public void setType(String type) { this.type = type; }
+            public String getValue() { return value; }
+            public void setValue(String value) { this.value = value; }
+            public String getAction() { return action; }
+            public void setAction(String action) { this.action = action; }
+            public int getPriority() { return priority; }
+            public void setPriority(int priority) { this.priority = priority; }
+        }
 
         public String getDefaultRoute() {
             return defaultRoute;
@@ -122,17 +160,102 @@ public class ProxyConfig {
         public void setDirectList(List<String> directList) {
             this.directList = directList;
         }
+
+        public List<String> getDirectProviders() { return directProviders; }
+        public void setDirectProviders(List<String> directProviders) { this.directProviders = directProviders; }
+
+        public List<String> getProxyProviders() { return proxyProviders; }
+        public void setProxyProviders(List<String> proxyProviders) { this.proxyProviders = proxyProviders; }
+
+        public List<RouteEntry> getRules() { return rules; }
+        public void setRules(List<RouteEntry> rules) { this.rules = rules; }
+        public List<String> getSystemDirectList() { return systemDirectList; }
+        public void setSystemDirectList(List<String> systemDirectList) { this.systemDirectList = systemDirectList; }
     }
 
     /**
      * 远程服务器配置
      */
     public static class RemoteServer {
+        private String id;
+        private String name;
+        public String getId() { return id; }
+        public void setId(String value) { id = value; }
+        public String getName() { return name; }
+        public void setName(String value) { name = value; }
         private String host;
         private int port;
         private boolean ssl = true;
         private String cipher = "aes-gcm";
         private String cipherKey = "";
+        private String transport = "http2";
+        private Http3Config http3 = new Http3Config();
+
+        public static class Http3Config {
+            private String serverName = "";
+            private String caFile = "";
+            private String certificatePin = "";
+            private int handshakeTimeoutMs = 5000;
+            private int idleTimeoutMs = 60000;
+            private int maxStreams = 1000;
+            private long initialConnectionWindow = 16777216L;
+            private long initialStreamWindow = 1048576L;
+            private int maxProxyMessageBytes = 8388608;
+            private long streamPendingHardLimit = 4194304L;
+            private long connectionPendingHardLimit = 67108864L;
+            private int writeBufferLowWaterMark = 262144;
+            private int writeBufferHighWaterMark = 1048576;
+
+            public void toUrlParameters(com.proxy.common.model.URL url) {
+                if (serverName != null && !serverName.trim().isEmpty()) {
+                    url.addParameter("http3.serverName", serverName);
+                }
+                url.addParameter("http3.caFile", caFile);
+                url.addParameter("http3.certificatePin", certificatePin);
+                url.addParameter("http3.handshakeTimeoutMs", handshakeTimeoutMs);
+                url.addParameter("http3.idleTimeoutMs", idleTimeoutMs);
+                url.addParameter("http3.maxStreams", maxStreams);
+                url.addParameter("http3.initialConnectionWindow", initialConnectionWindow);
+                url.addParameter("http3.initialStreamWindow", initialStreamWindow);
+                url.addParameter("http3.maxProxyMessageBytes", maxProxyMessageBytes);
+                url.addParameter("http3.streamPendingHardLimit", streamPendingHardLimit);
+                url.addParameter("http3.connectionPendingHardLimit", connectionPendingHardLimit);
+                url.addParameter("http3.writeBufferLowWaterMark", writeBufferLowWaterMark);
+                url.addParameter("http3.writeBufferHighWaterMark", writeBufferHighWaterMark);
+            }
+
+            public String getServerName() { return serverName; }
+            public void setServerName(String value) { serverName = value; }
+            public String getCaFile() { return caFile; }
+            public void setCaFile(String value) { caFile = value; }
+            public String getCertificatePin() { return certificatePin; }
+            public void setCertificatePin(String value) { certificatePin = value; }
+            public int getHandshakeTimeoutMs() { return handshakeTimeoutMs; }
+            public void setHandshakeTimeoutMs(int value) { handshakeTimeoutMs = value; }
+            public int getIdleTimeoutMs() { return idleTimeoutMs; }
+            public void setIdleTimeoutMs(int value) { idleTimeoutMs = value; }
+            public int getMaxStreams() { return maxStreams; }
+            public void setMaxStreams(int value) { maxStreams = value; }
+            public long getInitialConnectionWindow() { return initialConnectionWindow; }
+            public void setInitialConnectionWindow(long value) { initialConnectionWindow = value; }
+            public long getInitialStreamWindow() { return initialStreamWindow; }
+            public void setInitialStreamWindow(long value) { initialStreamWindow = value; }
+            public int getMaxProxyMessageBytes() { return maxProxyMessageBytes; }
+            public void setMaxProxyMessageBytes(int value) { maxProxyMessageBytes = value; }
+            public long getStreamPendingHardLimit() { return streamPendingHardLimit; }
+            public void setStreamPendingHardLimit(long value) { streamPendingHardLimit = value; }
+            public long getConnectionPendingHardLimit() { return connectionPendingHardLimit; }
+            public void setConnectionPendingHardLimit(long value) { connectionPendingHardLimit = value; }
+            public int getWriteBufferLowWaterMark() { return writeBufferLowWaterMark; }
+            public void setWriteBufferLowWaterMark(int value) { writeBufferLowWaterMark = value; }
+            public int getWriteBufferHighWaterMark() { return writeBufferHighWaterMark; }
+            public void setWriteBufferHighWaterMark(int value) { writeBufferHighWaterMark = value; }
+        }
+
+        public String getTransport() { return transport; }
+        public void setTransport(String value) { transport = value == null ? "http2" : value; }
+        public Http3Config getHttp3() { return http3; }
+        public void setHttp3(Http3Config value) { http3 = value == null ? new Http3Config() : value; }
 
         public String getHost() {
             return host;
@@ -226,7 +349,7 @@ public class ProxyConfig {
         return new ProxyConfig();
     }
 
-    private void validate() {
+    public void validate() {
         if (localPort <= 0 || localPort > 65535) {
             throw new IllegalArgumentException("Invalid local port: " + localPort);
         }
@@ -240,6 +363,71 @@ public class ProxyConfig {
             if (server.getPort() <= 0 || server.getPort() > 65535) {
                 throw new IllegalArgumentException("Invalid remote server port: " + server.getPort());
             }
+            if (!"http2".equals(server.getTransport()) && !"http3".equals(server.getTransport())
+                    && !"netty".equals(server.getTransport())) {
+                throw new IllegalArgumentException("Unknown transport: " + server.getTransport());
+            }
+        }
+        long http3Nodes = remoteServers.stream().filter(s -> "http3".equals(s.getTransport())).count();
+        if (nodeSelection == null && remoteServers.size() == 1 && http3Nodes == 1 && connectionsPerNode == 1) {
+            RemoteServer only = remoteServers.get(0);
+            if (only.getId() == null || only.getId().trim().isEmpty()) only.setId("legacy-node");
+            nodeSelection = new NodeSelection();
+            nodeSelection.setSelectedNodeId(only.getId());
+        }
+        if (nodeSelection != null) {
+            if (!"manual".equals(nodeSelection.getMode())) {
+                throw new IllegalArgumentException("Only manual node selection is supported in P2");
+            }
+            if (http3Nodes != remoteServers.size()) {
+                throw new IllegalArgumentException("Manual node selection currently requires HTTP/3 nodes");
+            }
+            java.util.Set<String> ids = new java.util.HashSet<>();
+            for (RemoteServer server : remoteServers) {
+                if (server.getId() == null || server.getId().trim().isEmpty() || !ids.add(server.getId())) {
+                    throw new IllegalArgumentException("Node IDs must be nonempty and unique");
+                }
+                validateHttp3Node(server);
+            }
+            if (!ids.contains(nodeSelection.getSelectedNodeId())) {
+                throw new IllegalArgumentException("Selected node ID does not exist");
+            }
+            if (connectionsPerNode != 1) throw new IllegalArgumentException("HTTP/3 requires connectionsPerNode=1");
+            if (timeoutMs < 1 || timeoutMs > 120000) throw new IllegalArgumentException("timeoutMs must be between 1 and 120000");
+        }
+        if (nodeSelection == null && http3Nodes > 0 && (remoteServers.size() != 1 || connectionsPerNode != 1)) {
+            throw new IllegalArgumentException("HTTP/3 V1 requires exactly one remote server and connectionsPerNode=1");
+        }
+    }
+
+    private static void validateHttp3Node(RemoteServer node) {
+        com.proxy.common.crypto.Cipher cipher = com.proxy.common.spi.ExtensionLoader
+                .getLoader(com.proxy.common.crypto.Cipher.class).newExtension(node.getCipher());
+        String key = node.getCipherKey() == null ? "" : node.getCipherKey();
+        cipher.init(key.isEmpty() ? new com.proxy.common.crypto.CipherConfig()
+                : new com.proxy.common.crypto.CipherConfig(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        RemoteServer.Http3Config h = node.getHttp3();
+        if (h.getHandshakeTimeoutMs() <= 0 || h.getHandshakeTimeoutMs() > 10000 || h.getIdleTimeoutMs() <= 0
+                || h.getMaxStreams() <= 0 || h.getInitialConnectionWindow() <= 0 || h.getInitialStreamWindow() <= 0
+                || h.getMaxProxyMessageBytes() <= 0 || h.getStreamPendingHardLimit() <= 0
+                || h.getConnectionPendingHardLimit() < h.getStreamPendingHardLimit()
+                || h.getWriteBufferLowWaterMark() < 0 || h.getWriteBufferHighWaterMark() <= h.getWriteBufferLowWaterMark()) {
+            throw new IllegalArgumentException("Invalid HTTP/3 limits");
+        }
+        String pin = h.getCertificatePin();
+        if (pin != null && !pin.trim().isEmpty()) {
+            String value = pin.trim().replaceFirst("^sha256/", "");
+            if (!value.matches("[0-9a-fA-F]{64}") && java.util.Base64.getDecoder().decode(value).length != 32) {
+                throw new IllegalArgumentException("Invalid HTTP/3 certificate pin");
+            }
+        }
+        if (h.getCaFile() != null && !h.getCaFile().isEmpty()) {
+            try (InputStream input = new java.io.File(h.getCaFile()).isFile() ? new FileInputStream(h.getCaFile())
+                    : ProxyConfig.class.getClassLoader().getResourceAsStream(h.getCaFile())) {
+                if (input == null || java.security.cert.CertificateFactory.getInstance("X.509").generateCertificates(input).isEmpty()) {
+                    throw new IllegalArgumentException("HTTP/3 CA file contains no certificates");
+                }
+            } catch (Exception failure) { throw new IllegalArgumentException("Invalid HTTP/3 CA file", failure); }
         }
     }
 

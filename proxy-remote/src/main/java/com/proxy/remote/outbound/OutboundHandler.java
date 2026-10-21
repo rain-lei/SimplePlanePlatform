@@ -48,7 +48,7 @@ public class OutboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         log.debug("Outbound channel to {}:{} inactive, closing session: sessionKey={}",
                 session.getTargetHost(), session.getTargetPort(), session.getSessionKey());
-        session.close();
+        session.closeFromTarget();
         super.channelInactive(ctx);
     }
 
@@ -56,7 +56,7 @@ public class OutboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         log.error("Exception on outbound channel to {}:{}, sessionKey={}",
                 session.getTargetHost(), session.getTargetPort(), session.getSessionKey(), cause);
-        session.close();
+        session.closeFromTarget();
         ctx.close();
     }
 }

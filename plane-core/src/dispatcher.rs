@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -252,14 +252,7 @@ async fn establish_outbound<P>(node: &RemoteNodeConfig, protector: &P) -> Result
 where
     P: SocketProtector,
 {
-    if !node.cipher.eq_ignore_ascii_case("chacha20") {
-        return Err(CoreError::InvalidArgument(format!(
-            "unsupported cipher for Android data plane: {}",
-            node.cipher
-        )));
-    }
-
-    let cipher = Cipher::new(&node.key)?;
+    let cipher = Cipher::from_name(&node.cipher.to_ascii_lowercase(), &node.key)?;
     if node.transport == Transport::Http3 {
         let addr = resolve_server_addr_with_protector(&node.host, node.port, protector)?;
         return outbound_h3::OutboundConnection::connect(
@@ -348,8 +341,12 @@ where
     use std::os::unix::io::AsRawFd;
 
     let addr = resolve_server_addr_with_protector(host, port, protector)?;
-    let socket = TcpSocket::new_v4()
-        .map_err(|e| CoreError::Io(std::io::Error::other(format!("create socket failed: {e}"))))?;
+    let socket = if addr.is_ipv6() {
+        TcpSocket::new_v6()
+    } else {
+        TcpSocket::new_v4()
+    }
+    .map_err(|e| CoreError::Io(std::io::Error::other(format!("create socket failed: {e}"))))?;
     let fd = socket.as_raw_fd();
     if !protector.protect(fd) {
         return Err(CoreError::Internal(format!(
@@ -445,29 +442,33 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 }
 
 fn resolve_server_addr(host: &str, port: u16) -> Result<SocketAddr> {
-    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+    if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::from((ip, port)));
     }
 
-    (host, port)
+    let mut addresses: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| {
             CoreError::Io(std::io::Error::other(format!(
                 "resolve {host}:{port} failed: {e}"
             )))
         })?
-        .find(|addr| addr.is_ipv4())
-        .ok_or_else(|| CoreError::Internal(format!("no IPv4 address for {host}:{port}")))
+        .collect();
+    addresses.sort_by_key(|addr| addr.is_ipv6());
+    addresses
+        .into_iter()
+        .next()
+        .ok_or_else(|| CoreError::Internal(format!("no IP address for {host}:{port}")))
 }
 
 fn resolve_server_addr_with_protector<P>(host: &str, port: u16, protector: &P) -> Result<SocketAddr>
 where
     P: SocketProtector,
 {
-    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+    if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::from((ip, port)));
     }
-    if let Some(ip) = protector.resolve_ipv4(host) {
+    if let Some(ip) = protector.resolve_ip(host) {
         return Ok(SocketAddr::from((ip, port)));
     }
     if !protector.allow_unprotected_dns_fallback() {
@@ -481,9 +482,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     struct ProtectedDnsOnly {
-        resolved: Option<Ipv4Addr>,
+        resolved: Option<IpAddr>,
     }
 
     impl SocketProtector for ProtectedDnsOnly {
@@ -491,7 +493,7 @@ mod tests {
             true
         }
 
-        fn resolve_ipv4(&self, _host: &str) -> Option<Ipv4Addr> {
+        fn resolve_ip(&self, _host: &str) -> Option<IpAddr> {
             self.resolved
         }
 
@@ -516,7 +518,7 @@ mod tests {
     #[test]
     fn protected_resolver_address_is_used() {
         let protector = ProtectedDnsOnly {
-            resolved: Some(Ipv4Addr::new(203, 0, 113, 7)),
+            resolved: Some(Ipv4Addr::new(203, 0, 113, 7).into()),
         };
         let addr = resolve_server_addr_with_protector("example.test", 443, &protector).unwrap();
         assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], 443)));
@@ -528,6 +530,24 @@ mod tests {
         let err = resolve_server_addr_with_protector("example.invalid", 443, &protector)
             .expect_err("protected DNS failure must be terminal");
         assert!(err.to_string().contains("protected DNS resolution failed"));
+    }
+
+    #[tokio::test]
+    async fn protected_ipv6_nodes_keep_their_address_family() {
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let protector = ProtectedDnsOnly {
+            resolved: Some("::1".parse().unwrap()),
+        };
+        assert_eq!(
+            resolve_server_addr_with_protector("::1", port, &protector).unwrap(),
+            listener.local_addr().unwrap(),
+        );
+        let stream = connect_protected("ipv6.test", port, &protector)
+            .await
+            .unwrap();
+        assert!(stream.peer_addr().unwrap().is_ipv6());
+        let _accepted = listener.accept().await.unwrap();
     }
 
     #[tokio::test]

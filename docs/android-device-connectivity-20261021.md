@@ -148,3 +148,25 @@ Android 构建同时运行配置单元测试。没有降低警告门禁，也没
 
 本地验证：Rust 1.99.1 的 `cargo clippy --locked --all-targets -- -D warnings` 无豁免通过；
 核心测试 90 通过、1 项外网测试默认忽略；Rust 1.96.1 的 Android arm64 release 检查通过。
+
+## 与上游 main 合并
+
+`fix/android-upstream-integration` 从 fork main 的 `911dd7b` 创建，合入上游
+`b125737`，处理 Android 工作流、VPN 服务、JNI、调度器、HTTP/2 出站和 Cargo.lock
+六处冲突，保留上游 HTTP/3 服务端、节点选择及 v2 加密功能。
+
+- Android 配置和调度器支持 `chacha20-poly1305-v2`、`aes-gcm-v2`，校验 v2 密钥必须为
+  32 个 UTF-8 字节。HTTP/2 和 HTTP/3 每条代理流各自创建加密会话，防止多流共享
+  v2 的序列号及密钥派生状态；新增双流收发回归。
+- 节点解析和 JNI 回调使用 `IpAddr`，保留 IPv4 优先以及物理网络 DNS，允许 IPv6
+  节点地址使用对应的 TCP/UDP socket。此处支持的是代理服务器地址，TUN 数据面仍为 IPv4。
+- 保留真实 Java 服务端互通工作流；互通测试适配由 `open_proxy_stream` 验证 CONNECT
+  应答的行为，避免重复等待已经消费的 ACK。
+- 保留密文长度限制、目标拒绝隔离、并发连接、现有配置及路由功能，未覆盖上游 Java 代码。
+
+本地合并验证：Rust 核心 100 项通过，2 项需外部服务的测试默认忽略；Rust 1.99.1 的
+格式检查及严格 Clippy（所有目标、无警告豁免）通过。三种 Android ABI 的 release
+原生库重新编译成功，Debug APK 构建成功，6 项 Android 配置测试通过。
+
+本节合并版本尚未覆盖安装到手机；上面的真机延迟和浏览器体验记录对应合并前已验证的
+`0.1.2-http3-fix` APK。

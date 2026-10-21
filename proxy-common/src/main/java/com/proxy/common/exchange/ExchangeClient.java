@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * </p>
  */
 public interface ExchangeClient {
+    default void setStreamClosedListener(java.util.function.LongConsumer listener) { }
 
     /**
      * 发送请求并等待响应（控制面：CONNECT/DISCONNECT）

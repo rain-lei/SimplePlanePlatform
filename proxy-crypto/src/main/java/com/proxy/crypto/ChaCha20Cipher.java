@@ -24,6 +24,9 @@ import java.security.SecureRandom;
  */
 public class ChaCha20Cipher implements Cipher {
 
+    // Legacy compatibility ONLY. The overlapping counter=0 construction is vulnerable.
+    // Never select this for a new deployment; use ChaCha20Poly1305V2Cipher on both endpoints.
+
     private static final Logger log = LoggerFactory.getLogger(ChaCha20Cipher.class);
 
     private static final int NONCE_LENGTH = 12;
@@ -48,6 +51,7 @@ public class ChaCha20Cipher implements Cipher {
         }
 
         log.info("ChaCha20-Poly1305 cipher initialized");
+        log.warn("Legacy chacha20 is non-standard and vulnerable; migrate both endpoints to chacha20-poly1305-v2");
     }
 
     @Override

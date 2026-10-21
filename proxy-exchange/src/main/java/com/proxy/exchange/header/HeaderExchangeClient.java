@@ -57,21 +57,28 @@ public class HeaderExchangeClient implements ExchangeClient {
         // 3. 创建 DefaultFuture（注册超时任务）
         long timeout = timeoutMs > 0 ? timeoutMs : getDefaultTimeout();
         DefaultFuture future = DefaultFuture.newFuture(requestId, timeout);
+        if (exchangeHandler != null) exchangeHandler.trackRequest(requestId, message.getStreamId(), future,
+                message.getType() == ProxyMessage.MessageType.CONNECT);
+
+        // Register before send: even an immediate write failure must release the stream.
+        future.whenComplete((response, error) -> {
+            if (message.getType() == ProxyMessage.MessageType.DISCONNECT
+                    || (message.getType() == ProxyMessage.MessageType.CONNECT
+                    && (error != null || response == null || !response.isSuccess()))) {
+                client.closeStream(message.getStreamId());
+            }
+        });
 
         // 4. 通过底层 Client 发送
         try {
+            if (future.isDone()) return future;
             client.send(message);
+            if (message.getType() == ProxyMessage.MessageType.CONNECT && future.isCompletedExceptionally()) {
+                client.closeStream(message.getStreamId());
+            }
         } catch (Exception e) {
             // 发送失败，立即完成 Future
             DefaultFuture.received(requestId, Response.error(e.getMessage()));
-        }
-
-        // 5. DISCONNECT 类型：收到响应后关闭对应 stream
-        if (message.getType() == ProxyMessage.MessageType.DISCONNECT) {
-            long streamId = message.getStreamId();
-            future.whenComplete((response, ex) -> {
-                client.closeStream(streamId);
-            });
         }
 
         // 6. 返回 Future
@@ -81,9 +88,7 @@ public class HeaderExchangeClient implements ExchangeClient {
     @Override
     public void send(ProxyMessage message) {
         if (!isAvailable()) {
-            log.warn("send() called but ExchangeClient not available, dropping: streamId={}",
-                    message != null ? message.getStreamId() : -1);
-            return;
+            throw new IllegalStateException("ExchangeClient is not available");
         }
         // 数据面：不生成 requestId、不创建 Future，仅依赖 streamId 发后即忘
         message.setRequestId(0);
@@ -91,6 +96,9 @@ public class HeaderExchangeClient implements ExchangeClient {
             client.send(message);
         } catch (Exception e) {
             log.error("send() failed: streamId={}", message.getStreamId(), e);
+            client.closeStream(message.getStreamId());
+            if (exchangeHandler != null) exchangeHandler.onStreamClosed(message.getStreamId(), e);
+            throw new IllegalStateException("Stream send failed", e);
         }
     }
 
@@ -98,6 +106,7 @@ public class HeaderExchangeClient implements ExchangeClient {
     public void close() {
         if (!closed) {
             closed = true;
+            if (exchangeHandler != null) exchangeHandler.onDisconnected();
             client.close();
             log.info("HeaderExchangeClient closed");
         }
@@ -111,6 +120,11 @@ public class HeaderExchangeClient implements ExchangeClient {
     @Override
     public Client getClient() {
         return client;
+    }
+
+    @Override
+    public void setStreamClosedListener(java.util.function.LongConsumer listener) {
+        if (exchangeHandler != null) exchangeHandler.setStreamClosedListener(listener);
     }
 
     @Override

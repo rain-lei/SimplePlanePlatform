@@ -4,6 +4,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidVpnConfigTest {
+    @Test fun v2SuitesKeepTheirConfigurationAndRequire32Utf8Bytes() {
+        for (suite in listOf("chacha20-poly1305-v2", "aes-gcm-v2")) {
+            val node = AndroidVpnConfig.defaultConfig().remotes.single().copy(
+                host = "::1", cipher = suite, key = "0123456789abcdef0123456789abcdef",
+            )
+            val config = AndroidVpnConfig(remotes = listOf(node))
+            assertNull(config.validate())
+            assertEquals(config, AndroidVpnConfig.fromJson(config.toJsonString()))
+            val imported = AndroidVpnConfig.fromImportText(config.toDesktopYaml()).remotes.single()
+            assertEquals(node.host, imported.host)
+            assertEquals(node.cipher, imported.cipher)
+            assertEquals(node.key, imported.key)
+            assertEquals(node.transport, imported.transport)
+            assertNotNull(config.copy(remotes = listOf(node.copy(key = "short"))).validate())
+            assertNotNull(config.copy(remotes = listOf(node.copy(key = "密".repeat(32)))).validate())
+        }
+    }
+
     @Test fun http3JsonRoundTripKeepsTransportAndTrust() {
         val config = AndroidVpnConfig.defaultConfig().let { it.copy(remotes = listOf(
             it.remotes.single().copy(serverName = "proxy.example", caPem = "private CA\n"),

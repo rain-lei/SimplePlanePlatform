@@ -130,7 +130,9 @@ ProxyMessage --ProxyCodec.encode--> 明文字节[] --Cipher.encrypt--> [nonce|ct
 HTTP/2 DATA 帧 --Cipher.decrypt--> 明文字节[] --累积缓冲--> 按 28+HostLen+DataLen 切出整条 ProxyMessage --decode-->
 ```
 
-**(C) ChaCha20-Poly1305 是「非标准」实现，禁止直接用 `chacha20poly1305` crate！**
+**(C) 旧 `chacha20` 的兼容约束（仅适用于 legacy，存在已确认的安全缺陷）**
+
+> 新套件已改用标准 AEAD：`chacha20-poly1305-v2` 与 `aes-gcm-v2`。下列 counter=0 重叠和禁止使用聚合 crate 的要求仅用于旧格式回归，不能指导新实现。完整规范与迁移要求见 [crypto-v2.md](crypto-v2.md)。
 
 对照 `ChaCha20Cipher.java`，与 RFC 8439 的差异：
 

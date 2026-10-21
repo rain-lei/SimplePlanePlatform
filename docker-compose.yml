@@ -1,14 +1,15 @@
 # =========================================================
-# Netty-Proxy 一键编排：proxy-remote（服务端） + proxy-local（客户端）
+# SimplePlane 一键编排：Proxy Remote + LogLens 连接/日志面板 + proxy-local
 #
 # 用法（项目根目录）：
-#   docker compose up -d --build          # 构建并后台启动两端
+#   docker compose up -d --build          # 构建并后台启动服务端、面板和本地代理
 #   docker compose logs -f                # 跟踪日志
 #   docker compose down                   # 停止并移除
 #
 # 说明：
 #   - proxy-local 通过 compose 内置 DNS 以服务名 "proxy-remote" 连接服务端
-#   - 仅 proxy-local 的 1080 端口对外暴露给宿主机；9090 仅在内网用于两端通信
+#   - LogLens Web 仍绑定容器 loopback；relay 通过宿主机 loopback 9527 暴露给 SSH 隧道
+#   - 9090 默认只在 compose 内网开放；需要外部客户端时叠加 docker-compose.remote-public.yml
 #   - 两端的 cipher / cipherKey 必须一致（见 docker/remote.yml 与 docker/proxy.yml）
 # =========================================================
 
@@ -20,24 +21,43 @@ services:
     image: netty-proxy-remote:1.0.0
     container_name: netty-proxy-remote
     restart: unless-stopped
-    # 9090 默认不映射到宿主机，仅供 compose 内网通信；
-    # 如需从外部直连服务端（两端分开部署），取消下面注释。
-    # ports:
-    #   - "9090:9090"
+    # LogLens Agent 严格绑定容器 loopback；独立 relay 监听容器端口 19527，
+    # 这里只把该端口发布到宿主机 loopback，供 SSH 隧道转发。
+    ports:
+      - "127.0.0.1:9527:19527/tcp"
     expose:
       - "9090"
     volumes:
-      # 挂载外部配置覆盖镜像内置 remote.yml（/app/config 在 classpath 最前）
       - ./docker/remote.yml:/app/config/remote.yml:ro
+      - ./docker/loglens-proxyremote.yaml:/app/config/loglens.yaml:ro
+      - ./loglens-data:/var/lib/loglens
     networks:
       - proxy-net
     healthcheck:
-      # 9090 端口可建立 TCP 连接即视为就绪
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9090' 2>/dev/null || exit 1"]
+      # 代理监听与 Agent loopback 面板均可连接后才视为就绪。
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9090' 2>/dev/null && bash -c '</dev/tcp/127.0.0.1/9527' 2>/dev/null"]
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 10s
+      start_period: 30s
+
+  loglens-panel-relay:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.panel-relay
+    image: simpleplane-loglens-panel-relay:1.0.0
+    container_name: simpleplane-loglens-panel-relay
+    restart: unless-stopped
+    # 与 proxy-remote 共享网络命名空间，才能从其 loopback 访问 LogLens。
+    network_mode: "service:proxy-remote"
+    depends_on:
+      proxy-remote:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T 2 -u /dev/null TCP:127.0.0.1:19527"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   proxy-local:
     build:
@@ -50,8 +70,8 @@ services:
       proxy-remote:
         condition: service_healthy
     ports:
-      # 宿主机 1080 → 容器 1080（SOCKS5 / HTTP CONNECT 共用）
-      - "1080:1080"
+      # 只允许宿主机本机应用使用 SOCKS5 / HTTP CONNECT。
+      - "127.0.0.1:1080:1080"
     volumes:
       - ./docker/proxy.yml:/app/config/proxy.yml:ro
       # 持久化本地端日志

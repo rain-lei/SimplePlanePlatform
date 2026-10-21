@@ -1,7 +1,23 @@
 # 构建产物
 **/target/
+.build/
+LogLens/.build/
+.cargo-local/
+.gradle-home/
+.m2/
+.rustup-local/
+.platform-tools-*/
+.apk-inspect-*/
+verify-api-test/
+update-server/
+dist/
+loglens-data/
+ladder.pem
+*.pem
+*.key
 # 日志
 logs/
+**/logs/
 **/*.log
 # IDE / 系统文件
 .idea/
@@ -13,3 +29,4 @@ logs/
 .gitignore
 # 文档（不参与构建，减小上下文）
 docs/
+LogLens/docs/
