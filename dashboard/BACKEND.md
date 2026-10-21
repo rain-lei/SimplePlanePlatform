@@ -1,5 +1,7 @@
 # SimplePlane Dashboard 后端开发文档
 
+HTTP/3 多节点手动选择已接入：保存配置采用原子替换，Java 监听外部配置并热应用；`GET /api/nodes/status` 返回运行时节点及保存/应用版本状态。切换不重启 Java，但会关闭旧节点代理连接；非法配置保留原有效快照。TUN 启动时为全部候选节点生成独立豁免配置，运行期间变更节点地址列表需停止 TUN 后重新启动。实现、迁移和测试说明见 [HTTP/3 多节点手动切换](../docs/design/http3-node-selection-p1-p2.md)。
+
 > 本文档描述 `dashboard/server.js` 这个后端服务的架构、进程管理模型、系统代理与 DNS 控制、跨平台差异、权限（sudo）方案、配置读写、SSE 推送，以及开发与排障规范。文档严格贴合当前代码实现。
 >
 > 配套文档：前端见 `dashboard/FRONTEND.md`。

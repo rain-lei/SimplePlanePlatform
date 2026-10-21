@@ -1,0 +1,157 @@
+package com.proxy.cluster;
+
+import com.proxy.common.cluster.ClusterInvoker;
+import com.proxy.common.cluster.LoadBalance;
+import com.proxy.common.filter.Invocation;
+import com.proxy.common.filter.Invoker;
+import com.proxy.common.filter.Response;
+import com.proxy.common.model.ProxyMessage;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+
+/** Selects a concrete connection only at CONNECT. Never retries or replays DATA. */
+public final class StickyClusterInvoker implements ClusterInvoker {
+    private volatile List<Invoker> invokers = Collections.emptyList();
+    private volatile LoadBalance loadBalance;
+    private final ConcurrentHashMap<Long, Binding> bindings = new ConcurrentHashMap<>();
+
+    private static final class Binding {
+        final Invoker invoker;
+        volatile boolean active;
+        volatile String nodeId;
+        volatile String connectionId;
+        volatile long generation;
+        Binding(Invoker invoker) { this.invoker = invoker; }
+    }
+
+    @Override
+    public CompletableFuture<Response> invoke(Invocation invocation) {
+        Object id = invocation.getAttachment("streamId");
+        if (id == null) return error("Missing streamId");
+        final long streamId;
+        try { streamId = Long.parseLong(id.toString()); }
+        catch (NumberFormatException invalid) { return error("Invalid streamId"); }
+        if (streamId == 0) return error("Invalid streamId");
+        if (invocation.getType() == ProxyMessage.MessageType.CONNECT) {
+            List<Invoker> available = getAvailableInvokers();
+            if (available.isEmpty()) return error("No available invoker");
+            Invoker selected = loadBalance == null ? available.get(0)
+                    : loadBalance.select(available, invocation, Collections.emptySet());
+            Binding binding = new Binding(selected);
+            if (bindings.putIfAbsent(streamId, binding) != null) return error("Stream already bound");
+            CompletableFuture<Response> result;
+            try {
+                result = selected.invoke(invocation);
+                binding.nodeId = (String) invocation.getAttachment("nodeId");
+                binding.connectionId = (String) invocation.getAttachment("connectionId");
+                Number generation = (Number) invocation.getAttachment("connectionGeneration");
+                binding.generation = generation == null ? 0 : generation.longValue();
+            } catch (RuntimeException failure) {
+                bindings.remove(streamId, binding);
+                return failed(failure);
+            }
+            return result.thenApply(response -> {
+                if (response != null && response.isSuccess() && bindings.get(streamId) == binding) {
+                    binding.active = true;
+                    return response;
+                }
+                bindings.remove(streamId, binding);
+                return response != null && !response.isSuccess() ? response : Response.error("Stream cancelled");
+            }).whenComplete((response, failure) -> {
+                if (failure != null) bindings.remove(streamId, binding);
+            });
+        }
+        Binding binding = bindings.get(streamId);
+        if (binding == null) return error("Stream is not bound");
+        if (invocation.getType() == ProxyMessage.MessageType.DISCONNECT) {
+            // Remove before invoking: a late CONNECT completion cannot resurrect this binding.
+            bindings.remove(streamId, binding);
+        } else if (invocation.getType() != ProxyMessage.MessageType.DATA || !binding.active) {
+            return error("Stream is not active");
+        }
+        try {
+            return binding.invoker.invoke(invocation);
+        } catch (RuntimeException failure) {
+            return failed(failure);
+        }
+    }
+
+    /** Called by the stream lifecycle owner after transport failure or browser cancellation. */
+    public void unbind(long streamId) { bindings.remove(streamId); }
+
+    /** Stop all old bindings before retiring their transports; cleanup uses the original concrete invoker. */
+    public void retireBindings() {
+        bindings.forEach((streamId, binding) -> {
+            if (!bindings.remove(streamId, binding)) return;
+            binding.active = false;
+            Invocation disconnect = new Invocation(null, 0, null, ProxyMessage.MessageType.DISCONNECT);
+            disconnect.setAttachment("streamId", streamId);
+            try { binding.invoker.invoke(disconnect); }
+            catch (RuntimeException ignored) { /* Transport closure remains the final cleanup boundary. */ }
+        });
+    }
+
+    public int getBindingCount() { return bindings.size(); }
+
+    /** Diagnostic metadata only: no transport objects or credentials escape the binding owner. */
+    public java.util.Map<String, Object> getBindingMetadata(long streamId) {
+        Binding binding = bindings.get(streamId);
+        if (binding == null) return Collections.emptyMap();
+        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>();
+        metadata.put("streamId", streamId);
+        metadata.put("nodeId", binding.nodeId);
+        metadata.put("connectionId", binding.connectionId);
+        metadata.put("generation", binding.generation);
+        metadata.put("state", binding.active ? "ACTIVE" : "CONNECTING");
+        return Collections.unmodifiableMap(metadata);
+    }
+
+    private static CompletableFuture<Response> error(String message) {
+        return CompletableFuture.completedFuture(Response.error(message));
+    }
+
+    private static CompletableFuture<Response> failed(Throwable cause) {
+        CompletableFuture<Response> result = new CompletableFuture<>();
+        result.completeExceptionally(cause);
+        return result;
+    }
+
+    @Override
+    public synchronized void setInvokers(List<Invoker> values) {
+        invokers = Collections.unmodifiableList(new ArrayList<>(values));
+    }
+
+    @Override
+    public synchronized void addInvoker(Invoker invoker) {
+        List<Invoker> copy = new ArrayList<>(invokers);
+        copy.add(invoker);
+        setInvokers(copy);
+    }
+
+    @Override
+    public synchronized void removeInvoker(Invoker invoker) {
+        List<Invoker> copy = new ArrayList<>(invokers);
+        copy.remove(invoker);
+        setInvokers(copy);
+    }
+
+    @Override
+    public void setLoadBalance(LoadBalance value) { loadBalance = value; }
+
+    @Override
+    public List<Invoker> getAvailableInvokers() {
+        List<Invoker> result = new ArrayList<>();
+        for (Invoker invoker : invokers) if (invoker.isAvailable()) result.add(invoker);
+        return result;
+    }
+
+    @Override
+    public boolean isAvailable() { return !getAvailableInvokers().isEmpty(); }
+
+    @Override
+    public int getActiveCount() { return bindings.size(); }
+}

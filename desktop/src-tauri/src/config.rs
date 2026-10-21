@@ -8,7 +8,42 @@ pub struct ProxyConfig {
     pub local: LocalConfig,
     pub remote: RemoteConfig,
     #[serde(default)]
+    pub nodes: Vec<RemoteNode>,
+    #[serde(default)]
+    pub selected_node_id: String,
+    #[serde(default)]
     pub route: RouteConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteNode {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(flatten)]
+    pub remote: RemoteConfig,
+}
+
+impl ProxyConfig {
+    pub fn normalize_nodes(&mut self) -> Result<(), String> {
+        if self.nodes.is_empty() && self.remote.transport == "http3" {
+            self.nodes.push(RemoteNode { id: "legacy-node".into(), name: String::new(), remote: self.remote.clone() });
+            self.selected_node_id = "legacy-node".into();
+        }
+        if self.nodes.is_empty() { return Ok(()); }
+        let mut ids = std::collections::HashSet::new();
+        for node in &self.nodes {
+            if node.id.trim().is_empty() || !ids.insert(node.id.clone()) {
+                return Err("节点 ID 不能为空或重复".into());
+            }
+            if node.remote.transport != "http3" || node.remote.host.trim().is_empty() || node.remote.port == 0 {
+                return Err("手动多节点目前仅支持有效的 HTTP/3 节点".into());
+            }
+        }
+        self.remote = self.nodes.iter().find(|node| node.id == self.selected_node_id)
+            .ok_or("请选择一个存在的节点")?.remote.clone();
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,17 +322,66 @@ pub fn load_proxy_config() -> Result<ProxyConfig, String> {
     let content =
         fs::read_to_string(&config_path).map_err(|e| format!("Failed to read config: {}", e))?;
 
-    serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))
+    let mut config: ProxyConfig = serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+    config.normalize_nodes()?;
+    Ok(config)
 }
 
 /// 保存代理配置
 pub fn save_proxy_config(config: &ProxyConfig) -> Result<(), String> {
+    let mut config = config.clone();
+    config.normalize_nodes()?;
     let config_path = get_config_dir().join("proxy.yml");
 
     let content =
-        serde_yaml::to_string(config).map_err(|e| format!("Failed to serialize config: {}", e))?;
+        serde_yaml::to_string(&config).map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-    fs::write(&config_path, content).map_err(|e| format!("Failed to write config: {}", e))
+    atomic_write(&config_path, &content)?;
+    atomic_write(&get_config_dir().join("proxy-java.yml"), &generate_java_compatible_yaml(&config))
+}
+
+fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = path.with_extension(format!("tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    fs::write(&temporary, content).map_err(|e| format!("Failed to write configuration: {}", e))?;
+    if let Err(e) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Failed to replace configuration: {}", e));
+    }
+    Ok(())
+}
+
+pub fn read_node_status() -> Option<serde_json::Value> {
+    let text = fs::read_to_string(get_config_dir().join("proxy-java.yml.status.json")).ok()?;
+    let status: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+    let updated = status.get("updatedAt")?.as_u64()?;
+    if status.get("running")?.as_bool()? && now.saturating_sub(updated) < 10000 { Some(status) } else { None }
+}
+
+pub fn write_tun_node_config() -> Result<PathBuf, String> {
+    use std::net::ToSocketAddrs;
+    let mut value: toml::Value = toml::from_str(&load_tun_config_raw()?).map_err(|e| format!("Invalid TUN config: {}", e))?;
+    let proxy = load_proxy_config()?;
+    let hosts: Vec<String> = if proxy.nodes.is_empty() { vec![proxy.remote.host] }
+        else { proxy.nodes.iter().map(|node| node.remote.host.clone()).collect() };
+    let mut ips = std::collections::BTreeSet::new();
+    for host in hosts {
+        for address in (host.as_str(), 0).to_socket_addrs().map_err(|e| format!("Cannot resolve node address: {}", e))? {
+            ips.insert(address.ip().to_string());
+        }
+    }
+    let root = value.as_table_mut().ok_or("TUN configuration must be a table")?;
+    if !root.contains_key("bypass") { root.insert("bypass".into(), toml::Value::Table(toml::map::Map::new())); }
+    let bypass = root.get_mut("bypass").and_then(|value| value.as_table_mut()).ok_or("TUN bypass must be a table")?;
+    let mut existing = bypass.get("proxy_remote_ips").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for ip in ips {
+        if !existing.iter().any(|v| v.as_str() == Some(ip.as_str())) { existing.push(toml::Value::String(ip)); }
+    }
+    bypass.insert("proxy_remote_ips".into(), toml::Value::Array(existing));
+    let path = get_config_dir().join("tun-nodes.toml");
+    atomic_write(&path, &toml::to_string(&value).map_err(|e| e.to_string())?)?;
+    Ok(path)
 }
 
 /// 读取 TUN 配置
@@ -365,6 +449,8 @@ pub fn save_tun_config_raw(content: &str) -> Result<(), String> {
 /// 默认代理配置模板（可直接连接）
 fn get_default_proxy_config() -> ProxyConfig {
     ProxyConfig {
+        nodes: Vec::new(),
+        selected_node_id: String::new(),
         local: LocalConfig {
             port: 1080,
             http_proxy_enabled: true,
@@ -560,7 +646,7 @@ dns_bypass_ips = ["114.114.114.114", "223.5.5.5"]
 ///   port: 9090
 ///   cipher: chacha20
 ///   key: "key"
-pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteConfig>, String> {
+pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteNode>, String> {
     let value: serde_yaml::Value = serde_yaml::from_str(yaml_content)
         .map_err(|e| format!("YAML 解析失败: {}", e))?;
 
@@ -569,7 +655,7 @@ pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteConfig>, 
     // 尝试格式一：remoteServers 列表
     if let Some(remote_servers) = value.get("remoteServers").and_then(|v| v.as_sequence()) {
         for item in remote_servers {
-            servers.push(parse_server_entry(item)?);
+            servers.push(parse_node_entry(item, servers.len())?);
         }
         if !servers.is_empty() {
             return Ok(servers);
@@ -579,7 +665,7 @@ pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteConfig>, 
     // 尝试格式二：servers 列表
     if let Some(server_list) = value.get("servers").and_then(|v| v.as_sequence()) {
         for item in server_list {
-            servers.push(parse_server_entry(item)?);
+            servers.push(parse_node_entry(item, servers.len())?);
         }
         if !servers.is_empty() {
             return Ok(servers);
@@ -588,14 +674,14 @@ pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteConfig>, 
 
     // 尝试格式三：顶层就是单个服务器
     if value.get("host").is_some() {
-        servers.push(parse_server_entry(&value)?);
+        servers.push(parse_node_entry(&value, 0)?);
         return Ok(servers);
     }
 
     // 尝试格式四：顶层是数组
     if let Some(arr) = value.as_sequence() {
         for item in arr {
-            servers.push(parse_server_entry(item)?);
+            servers.push(parse_node_entry(item, servers.len())?);
         }
         if !servers.is_empty() {
             return Ok(servers);
@@ -603,6 +689,15 @@ pub fn parse_servers_from_yaml(yaml_content: &str) -> Result<Vec<RemoteConfig>, 
     }
 
     Err("无法识别的 YAML 格式，请确保包含 remoteServers 或 servers 字段".to_string())
+}
+
+fn parse_node_entry(value: &serde_yaml::Value, index: usize) -> Result<RemoteNode, String> {
+    Ok(RemoteNode {
+        id: value.get("id").and_then(|v| v.as_str()).map(String::from)
+            .unwrap_or_else(|| format!("imported-{}", index + 1)),
+        name: value.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        remote: parse_server_entry(value)?,
+    })
 }
 
 /// 从单个 YAML 节点解析出一个 RemoteConfig
@@ -671,28 +766,32 @@ pub fn generate_java_compatible_yaml(config: &ProxyConfig) -> String {
     // localPort
     yaml.push_str(&format!("localPort: {}\n", config.local.port));
 
-    // remoteServers (Java 支持多服务器列表)
-    yaml.push_str("remoteServers:\n");
-    yaml.push_str(&format!("  - host: {}\n", config.remote.host));
-    yaml.push_str(&format!("    port: {}\n", config.remote.port));
-    yaml.push_str(&format!("    cipher: {}\n", config.remote.cipher));
-    yaml.push_str(&format!("    cipherKey: \"{}\"\n", config.remote.key));
-    yaml.push_str("    ssl: false\n");
-    yaml.push_str(&format!("    transport: {}\n", config.remote.transport));
-    yaml.push_str("    http3:\n");
-    yaml.push_str(&format!("      serverName: \"{}\"\n", config.remote.http3.server_name));
-    yaml.push_str(&format!("      caFile: \"{}\"\n", config.remote.http3.ca_file));
-    yaml.push_str(&format!("      certificatePin: \"{}\"\n", config.remote.http3.certificate_pin));
-    yaml.push_str(&format!("      handshakeTimeoutMs: {}\n", config.remote.http3.handshake_timeout_ms));
-    yaml.push_str(&format!("      idleTimeoutMs: {}\n", config.remote.http3.idle_timeout_ms));
-    yaml.push_str(&format!("      maxStreams: {}\n", config.remote.http3.max_streams));
-    yaml.push_str(&format!("      initialConnectionWindow: {}\n", config.remote.http3.initial_connection_window));
-    yaml.push_str(&format!("      initialStreamWindow: {}\n", config.remote.http3.initial_stream_window));
-    yaml.push_str(&format!("      maxProxyMessageBytes: {}\n", config.remote.http3.max_proxy_message_bytes));
-    yaml.push_str(&format!("      streamPendingHardLimit: {}\n", config.remote.http3.stream_pending_hard_limit));
-    yaml.push_str(&format!("      connectionPendingHardLimit: {}\n", config.remote.http3.connection_pending_hard_limit));
-    yaml.push_str(&format!("      writeBufferLowWaterMark: {}\n", config.remote.http3.write_buffer_low_water_mark));
-    yaml.push_str(&format!("      writeBufferHighWaterMark: {}\n", config.remote.http3.write_buffer_high_water_mark));
+    let nodes: Vec<RemoteNode> = if config.nodes.is_empty() {
+        vec![RemoteNode { id: "legacy-node".into(), name: String::new(), remote: config.remote.clone() }]
+    } else { config.nodes.clone() };
+    let mut servers = Vec::new();
+    for node in &nodes {
+        let remote = &node.remote;
+        let h = &remote.http3;
+        servers.push(serde_json::json!({
+            "id": node.id, "name": node.name, "host": remote.host, "port": remote.port,
+            "cipher": remote.cipher, "cipherKey": remote.key, "ssl": false, "transport": remote.transport,
+            "http3": {
+                "serverName": h.server_name, "caFile": h.ca_file, "certificatePin": h.certificate_pin,
+                "handshakeTimeoutMs": h.handshake_timeout_ms, "idleTimeoutMs": h.idle_timeout_ms,
+                "maxStreams": h.max_streams, "initialConnectionWindow": h.initial_connection_window,
+                "initialStreamWindow": h.initial_stream_window, "maxProxyMessageBytes": h.max_proxy_message_bytes,
+                "streamPendingHardLimit": h.stream_pending_hard_limit, "connectionPendingHardLimit": h.connection_pending_hard_limit,
+                "writeBufferLowWaterMark": h.write_buffer_low_water_mark, "writeBufferHighWaterMark": h.write_buffer_high_water_mark
+            }
+        }));
+    }
+    let mut selection = serde_json::json!({ "remoteServers": servers });
+    if nodes.iter().all(|node| node.remote.transport == "http3") {
+        let selected = if config.selected_node_id.is_empty() { &nodes[0].id } else { &config.selected_node_id };
+        selection["nodeSelection"] = serde_json::json!({ "mode": "manual", "selectedNodeId": selected });
+    }
+    yaml.push_str(&serde_yaml::to_string(&selection).expect("serializable node configuration"));
 
     // cluster & loadBalance
     yaml.push_str("cluster: failover\n");
@@ -769,7 +868,61 @@ pub fn write_java_config() -> Result<PathBuf, String> {
     let config = load_proxy_config()?;
     let java_yaml = generate_java_compatible_yaml(&config);
     let java_config_path = get_config_dir().join("proxy-java.yml");
-    fs::write(&java_config_path, java_yaml)
-        .map_err(|e| format!("Failed to write Java config: {}", e))?;
+    atomic_write(&java_config_path, &java_yaml)?;
     Ok(java_config_path)
+}
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_config_migrates_to_one_stable_manual_node() {
+        let mut config = get_default_proxy_config();
+        config.normalize_nodes().unwrap();
+        assert_eq!(config.nodes.len(), 1);
+        assert_eq!(config.selected_node_id, "legacy-node");
+        let saved = serde_yaml::to_string(&config).unwrap();
+        let mut loaded: ProxyConfig = serde_yaml::from_str(&saved).unwrap();
+        loaded.normalize_nodes().unwrap();
+        assert_eq!(loaded.nodes[0].id, "legacy-node");
+        assert_eq!(loaded.remote.key, config.remote.key);
+    }
+
+    #[test]
+    fn java_yaml_contains_all_nodes_selection_and_escaped_credentials() {
+        let mut config = get_default_proxy_config();
+        config.normalize_nodes().unwrap();
+        let mut second = config.nodes[0].clone();
+        second.id = "node-b".into();
+        second.remote.host = "b.example".into();
+        second.remote.key = "quote\" slash\\ newline\n".into();
+        second.remote.http3.ca_file = "C:\\certs\\ca.pem".into();
+        config.nodes.push(second);
+        config.selected_node_id = "node-b".into();
+        config.normalize_nodes().unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&generate_java_compatible_yaml(&config)).unwrap();
+        assert_eq!(value["remoteServers"].as_sequence().unwrap().len(), 2);
+        assert_eq!(value["nodeSelection"]["selectedNodeId"].as_str(), Some("node-b"));
+        assert_eq!(value["remoteServers"][1]["cipherKey"].as_str(), Some(config.remote.key.as_str()));
+        assert_eq!(value["remoteServers"][1]["http3"]["caFile"].as_str(), Some("C:\\certs\\ca.pem"));
+    }
+
+    #[test]
+    fn duplicate_and_missing_selected_node_are_rejected() {
+        let mut config = get_default_proxy_config();
+        config.normalize_nodes().unwrap();
+        config.nodes.push(config.nodes[0].clone());
+        assert!(config.normalize_nodes().is_err());
+        config.nodes.pop();
+        config.selected_node_id = "missing".into();
+        assert!(config.normalize_nodes().is_err());
+    }
+
+    #[test]
+    fn importing_nodes_preserves_ids_and_http3_options() {
+        let nodes = parse_servers_from_yaml("remoteServers:\n  - id: stable-a\n    name: A\n    host: a.example\n    port: 9090\n    transport: http3\n    http3:\n      caFile: ca.pem\n").unwrap();
+        assert_eq!(nodes[0].id, "stable-a");
+        assert_eq!(nodes[0].remote.http3.ca_file, "ca.pem");
+    }
 }

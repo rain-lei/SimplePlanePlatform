@@ -24,6 +24,8 @@ import com.proxy.common.model.ProxyMessage;
  * </p>
  */
 public interface Client {
+    /** Physical connection generation; stream state must never survive a generation change. */
+    default long getConnectionGeneration() { return 0; }
 
     /**
      * 发送消息

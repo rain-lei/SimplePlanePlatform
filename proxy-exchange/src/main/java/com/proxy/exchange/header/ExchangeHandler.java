@@ -66,18 +66,57 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     private volatile ConcurrentHashMap<Long, ChannelHandlerContext> streamRegistry;
     private static final AttributeKey<Long> STREAM_ID = AttributeKey.valueOf("proxy.logical.streamId");
     private final ConcurrentHashMap<Long, PendingRequest> pendingRequests = new ConcurrentHashMap<>();
+    // Retained after CONNECT completes: established streams still belong to this connection.
+    private final java.util.Set<Long> ownedStreams = ConcurrentHashMap.newKeySet();
+    private volatile java.util.function.LongConsumer streamClosedListener = ignored -> { };
+    private final ConcurrentHashMap<Long, DownstreamGate> downstreamGates = new ConcurrentHashMap<>();
+    private static final class DownstreamGate {
+        boolean active;
+        int bytes;
+        final java.util.ArrayDeque<ProxyMessage> pending = new java.util.ArrayDeque<>();
+    }
+
+    public void deferDownstream(long streamId) { downstreamGates.putIfAbsent(streamId, new DownstreamGate()); }
+
+    public void activateDownstream(long streamId) {
+        DownstreamGate gate = downstreamGates.get(streamId);
+        if (gate == null) return;
+        synchronized (gate) {
+            if (!ownedStreams.contains(streamId)) return;
+            gate.active = true;
+            while (!gate.pending.isEmpty()) deliverPush(gate.pending.removeFirst());
+            gate.bytes = 0;
+        }
+    }
+
+    public void setStreamClosedListener(java.util.function.LongConsumer listener) {
+        streamClosedListener = java.util.Objects.requireNonNull(listener);
+    }
+
+    void trackStream(long streamId) { ownedStreams.add(streamId); }
+
+    /** CONNECT failure is reported by the browser handshake handler before it closes the browser. */
+    void abandonConnect(long streamId) {
+        boolean owned = ownedStreams.remove(streamId);
+        DownstreamGate gate = downstreamGates.remove(streamId);
+        if (gate != null) synchronized (gate) { gate.pending.clear(); gate.bytes = 0; }
+        if (owned) streamClosedListener.accept(streamId);
+    }
 
     private static final class PendingRequest {
         final long streamId;
         final DefaultFuture future;
-        PendingRequest(long streamId, DefaultFuture future) {
+        final boolean connecting;
+        PendingRequest(long streamId, DefaultFuture future, boolean connecting) {
             this.streamId = streamId;
             this.future = future;
+            this.connecting = connecting;
         }
     }
 
     void trackRequest(long requestId, long streamId, DefaultFuture future, boolean cancelWithBrowser) {
-        PendingRequest pending = new PendingRequest(streamId, future);
+        if (cancelWithBrowser) ownedStreams.add(streamId);
+        PendingRequest pending = new PendingRequest(streamId, future, cancelWithBrowser);
         pendingRequests.put(requestId, pending);
         future.whenComplete((response, error) -> pendingRequests.remove(requestId, pending));
         ChannelHandlerContext browser = streamRegistry != null ? streamRegistry.get(streamId) : null;
@@ -170,7 +209,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
             log.error("Invoker.invoke() threw exception for requestId={}, type={}",
                     message.getRequestId(), message.getType(), e);
             permit.release();  // 同步异常时立即释放
-            writeErrorResponse(ctx, message.getRequestId(), e.getMessage());
+            writeErrorResponse(ctx, message.getRequestId(), message.getStreamId(), e.getMessage());
             return;
         }
 
@@ -179,7 +218,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
             if (throwable != null) {
                 log.error("Invoker chain completed exceptionally for requestId={}",
                         message.getRequestId(), throwable);
-                writeErrorResponse(ctx, message.getRequestId(), throwable.getMessage());
+                writeErrorResponse(ctx, message.getRequestId(), message.getStreamId(), throwable.getMessage());
                 return;
             }
             if (response == null) {
@@ -236,6 +275,12 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
      * 客户端处理控制面响应（requestId > 0）
      */
     private void handleResponse(ProxyMessage message, long requestId) {
+        PendingRequest pending = pendingRequests.get(requestId);
+        if (pending == null || (message.getStreamId() != 0 && pending.streamId != message.getStreamId())) {
+            log.warn("Discarding response from wrong connection/stream: requestId={}, streamId={}",
+                    requestId, message.getStreamId());
+            return;
+        }
         log.info("CLIENT received response: requestId={}, type={}, status={}",
                 requestId, message.getType(), message.getStatus());
         Response response;
@@ -256,6 +301,28 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
      * </p>
      */
     private void handlePush(ProxyMessage message) {
+        if (!ownedStreams.contains(message.getStreamId())) return;
+        DownstreamGate gate = downstreamGates.get(message.getStreamId());
+        if (gate != null) {
+            synchronized (gate) {
+                if (!gate.active) {
+                    int bytes = message.getData() == null ? 0 : message.getData().length;
+                    if (gate.bytes + bytes > 1048576 || gate.pending.size() >= 1024) {
+                        onStreamClosed(message.getStreamId(), new IllegalStateException("Early downstream limit exceeded"));
+                    } else {
+                        gate.pending.addLast(message);
+                        gate.bytes += bytes;
+                    }
+                    return;
+                }
+                deliverPush(message);
+                return;
+            }
+        }
+        deliverPush(message);
+    }
+
+    private void deliverPush(ProxyMessage message) {
         if (streamRegistry == null) {
             log.debug("Received push but no streamRegistry configured: type={}, streamId={}",
                     message.getType(), message.getStreamId());
@@ -263,6 +330,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
         }
 
         long streamId = message.getStreamId();
+        if (!ownedStreams.contains(streamId)) return;
         if (streamId == 0) {
             log.warn("Received push with requestId=0 and streamId=0 (invalid), discarding");
             return;
@@ -290,8 +358,7 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
         // 如果是 DISCONNECT 类型，关闭浏览器连接并注销
         if (message.getType() == ProxyMessage.MessageType.DISCONNECT) {
             log.debug("Received DISCONNECT for streamId={}, closing browser channel", streamId);
-            browserCtx.close();
-            streamRegistry.remove(streamId);
+            onStreamClosed(streamId, null);
         }
     }
 
@@ -358,18 +425,27 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
 
     private void failPending(Throwable cause) {
         for (PendingRequest pending : pendingRequests.values()) pending.future.completeExceptionally(cause);
+        for (Long streamId : ownedStreams.toArray(new Long[0])) onStreamClosed(streamId, cause);
     }
 
     @Override
     public void onStreamClosed(long streamId, Throwable cause) {
+        boolean owned = ownedStreams.remove(streamId);
+        DownstreamGate gate = downstreamGates.remove(streamId);
+        if (gate != null) synchronized (gate) { gate.pending.clear(); gate.bytes = 0; }
         Throwable failure = cause != null ? cause : new java.nio.channels.ClosedChannelException();
+        boolean connecting = false;
         for (PendingRequest pending : pendingRequests.values()) {
-            if (pending.streamId == streamId) pending.future.completeExceptionally(failure);
+            if (pending.streamId == streamId) {
+                connecting |= pending.connecting;
+                pending.future.completeExceptionally(failure);
+            }
         }
-        if (streamRegistry != null) {
+        if (owned && !connecting && streamRegistry != null) {
             ChannelHandlerContext browser = streamRegistry.remove(streamId);
             if (browser != null) browser.close();
         }
+        if (owned) streamClosedListener.accept(streamId);
     }
 
     // ==================== 工具方法 ====================
@@ -395,10 +471,11 @@ public class ExchangeHandler extends SimpleChannelInboundHandler<ProxyMessage> i
     /**
      * 回写错误响应（服务端使用）
      */
-    private void writeErrorResponse(ChannelHandlerContext ctx, long requestId, String errorMessage) {
+    private void writeErrorResponse(ChannelHandlerContext ctx, long requestId, long streamId, String errorMessage) {
         if (ctx.channel().isActive()) {
             ProxyMessage reply = ProxyMessage.builder()
                     .requestId(requestId)
+                    .streamId(streamId)
                     .type(ProxyMessage.MessageType.CONNECT_RESPONSE)
                     .status(Response.ERROR)
                     .message(errorMessage != null ? errorMessage : "Internal server error")

@@ -231,7 +231,7 @@
           <div class="field-group">
             <label class="field-label">每节点连接数</label>
             <input type="number" id="connectionsPerNode" class="input" min="1" max="10">
-            <span class="field-hint">HTTP/2 多路复用，1-2 即可</span>
+            <span class="field-hint">同一节点内的连接数量，通常使用 1–2 条</span>
           </div>
           <div class="field-group">
             <label class="field-label">HTTP CONNECT</label>
@@ -249,6 +249,8 @@
             <button class="btn btn-sm btn-accent" id="btnAddServer">+ 添加服务器</button>
           </div>
           <div id="remoteServers" class="server-list"></div>
+          <p class="field-hint">HTTP/3 使用手动节点选择。保存并切换会断开旧节点的代理连接，部分应用需要刷新或重新连接。</p>
+          <p class="field-hint" id="nodeApplyStatus" role="status" aria-live="polite">等待运行时状态</p>
         </div>
       </section>
 

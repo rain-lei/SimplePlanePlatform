@@ -37,6 +37,10 @@ public class ClientInvoker implements Invoker {
         }
 
         // 构建 ProxyMessage
+        if (invocation.getType() == ProxyMessage.MessageType.CONNECT) {
+            invocation.setAttachment("connectionId", exchangeClient.getConnectionId());
+            invocation.setAttachment("connectionGeneration", exchangeClient.getClient().getConnectionGeneration());
+        }
         ProxyMessage message = new ProxyMessage();
         message.setType(invocation.getType());
         message.setHost(invocation.getTargetHost());
@@ -52,6 +56,12 @@ public class ClientInvoker implements Invoker {
         }
 
         // 数据面（DATA）：发后即忘，不生成 requestId/Future。
+        if (invocation.getType() == ProxyMessage.MessageType.CONNECT
+                && Boolean.TRUE.equals(invocation.getAttachment("deferDownstream"))) {
+            exchangeClient.deferDownstream(message.getStreamId());
+            invocation.setAttachment("activateDownstream", (Runnable) () ->
+                    exchangeClient.activateDownstream(message.getStreamId()));
+        }
         // 上行数据仅依赖 streamId 寻址，服务端回包由 ExchangeHandler 按 streamId 路由写回浏览器。
         if (invocation.getType() == ProxyMessage.MessageType.DATA) {
             exchangeClient.send(message);
@@ -63,7 +73,8 @@ public class ClientInvoker implements Invoker {
         // 活跃计数 +1
         activeCount.incrementAndGet();
 
-        return exchangeClient.request(message, timeoutMs)
+        Number requestTimeout = (Number) invocation.getAttachment("requestTimeoutMs");
+        return exchangeClient.request(message, requestTimeout == null ? timeoutMs : requestTimeout.longValue())
                 .whenComplete((response, throwable) -> {
                     // 活跃计数 -1
                     activeCount.decrementAndGet();

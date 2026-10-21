@@ -67,7 +67,7 @@ public class RelayHandler extends ChannelInboundHandlerAdapter {
             invocation.setAttachment("streamId", streamId);
 
             invoker.invoke(invocation).whenComplete((response, throwable) -> {
-                if (throwable != null) {
+                if (throwable != null || (response != null && !response.isSuccess())) {
                     log.error("Relay DATA failed for {}:{}, streamId={}", targetHost, targetPort, streamId, throwable);
                     ctx.close();
                 }

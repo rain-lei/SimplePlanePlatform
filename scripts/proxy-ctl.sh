@@ -119,7 +119,7 @@ start_proxy_local() {
 
     # nohup 后台运行，日志走项目自身 logback 配置
     # shellcheck disable=SC2086
-    nohup java $jvm_opts -jar "$PROXY_JAR" >/dev/null 2>&1 &
+    nohup java $jvm_opts -jar "$PROXY_JAR" "${REPO_ROOT}/proxy-local/src/main/resources/proxy.yml" >/dev/null 2>&1 &
     local pid=$!
 
     echo "[proxy-local] 启动中 (PID=$pid)，等待监听 ${LOCAL_PORT} ..."

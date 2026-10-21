@@ -40,6 +40,9 @@ public final class Http3Client implements Client {
     private final ConcurrentHashMap<Long, Http3StreamState> streams = new ConcurrentHashMap<>();
     private final AtomicLong connectionPendingBytes = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicLong generation = new AtomicLong();
+
+    @Override public long getConnectionGeneration() { return generation.get(); }
     private final ScheduledExecutorService reconnectScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "http3-reconnect");
         thread.setDaemon(true);
@@ -233,8 +236,9 @@ public final class Http3Client implements Client {
     }
 
     private void attachConnectionListener() {
+        long observedGeneration = generation.incrementAndGet();
         connection.channel().closeFuture().addListener(f -> {
-            if (closed.get()) {
+            if (closed.get() || generation.get() != observedGeneration) {
                 return;
             }
             List<Http3StreamState> snapshot = new ArrayList<>(streams.values());

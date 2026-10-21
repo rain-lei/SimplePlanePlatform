@@ -66,7 +66,10 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
 
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-        if (plainHttpPending) return;
+        if (plainHttpPending) {
+            if (in.readableBytes() > 1048576) ctx.close();
+            return;
+        }
         // 检查是否收到完整的 HTTP 请求头（以 \r\n\r\n 结尾）
         int readableBytes = in.readableBytes();
         // 从可读区域搜索 \r\n\r\n
@@ -172,8 +175,12 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
             // 通过 ClusterInvoker 向远程发送 CONNECT 请求
             Invocation invocation = new Invocation(targetHost, targetPort, null, ProxyMessage.MessageType.CONNECT);
             invocation.setAttachment("streamId", streamId);
+            invocation.setAttachment("deferDownstream", true);
+            plainHttpPending = true;
+            ctx.channel().config().setAutoRead(false);
 
-            invoker.invoke(invocation).whenComplete((response, throwable) -> {
+            invoker.invoke(invocation).whenCompleteAsync((response, throwable) -> {
+                if (!ctx.channel().isActive()) return;
                 if (throwable != null) {
                     log.error("HTTP CONNECT failed for {}:{}", host, port, throwable);
                     streamRegistry.unregister(streamId);
@@ -185,10 +192,13 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
                 if (response != null && response.isSuccess()) {
                     // 回复 200 Connection Established
                     ctx.writeAndFlush(Unpooled.copiedBuffer(CONNECT_RESPONSE, StandardCharsets.UTF_8));
+                    Runnable activate = (Runnable) invocation.getAttachment("activateDownstream");
+                    if (activate != null) activate.run();
 
                     // 切换到 Relay 模式：先添加 RelayHandler，再移除自身
                     ctx.pipeline().addLast("relay", new RelayHandler(invoker, host, port, streamId));
                     ctx.pipeline().remove(HttpConnectHandler.this);
+                    ctx.channel().config().setAutoRead(true);
 
                     log.info("HTTP tunnel established: {}:{}, streamId={}", host, port, streamId);
                 } else {
@@ -198,7 +208,7 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
                     ctx.writeAndFlush(Unpooled.copiedBuffer(BAD_GATEWAY, StandardCharsets.UTF_8));
                     ctx.close();
                 }
-            });
+            }, ctx.executor());
         }
     }
 
@@ -283,7 +293,10 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
         streamRegistry.register(streamId, ctx);
         Invocation invocation = new Invocation(host, port, null, ProxyMessage.MessageType.CONNECT);
         invocation.setAttachment("streamId", streamId);
-        invoker.invoke(invocation).whenComplete((response, throwable) -> {
+        invocation.setAttachment("deferDownstream", true);
+        ctx.channel().config().setAutoRead(false);
+        invoker.invoke(invocation).whenCompleteAsync((response, throwable) -> {
+            if (!ctx.channel().isActive()) return;
             if (throwable != null || response == null || !response.isSuccess()) {
                 String reason = throwable != null ? throwable.toString()
                         : response == null ? "empty response" : response.getErrorMessage();
@@ -293,11 +306,14 @@ public class HttpConnectHandler extends ByteToMessageDecoder {
                 ctx.close();
                 return;
             }
+            Runnable activate = (Runnable) invocation.getAttachment("activateDownstream");
+            if (activate != null) activate.run();
             ctx.pipeline().addLast("http-proxy-relay",
                     new HttpProxyRelayHandler(invoker, host, port, streamId, rewrittenRequest));
             ctx.pipeline().remove(HttpConnectHandler.this);
+            ctx.channel().config().setAutoRead(true);
             log.info("Plain HTTP proxy connection established: {}:{}, streamId={}", host, port, streamId);
-        });
+        }, ctx.executor());
     }
 
     @Override

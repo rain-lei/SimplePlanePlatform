@@ -57,6 +57,15 @@ public class ProxyLocalServer {
     private final EventLoopGroup workerGroup;
     private final SystemProxyManager systemProxyManager;
     private Channel serverChannel;
+    private com.proxy.local.config.NodeConfigWatcher nodeConfigWatcher;
+
+    public void watchNodeConfig(java.nio.file.Path path) throws Exception {
+        if (!(clusterInvoker instanceof com.proxy.local.config.Http3NodeController)) {
+            throw new IllegalStateException("Manual HTTP/3 node selection is not enabled");
+        }
+        nodeConfigWatcher = new com.proxy.local.config.NodeConfigWatcher(path,
+                (com.proxy.local.config.Http3NodeController) clusterInvoker, config);
+    }
 
     public ProxyLocalServer(ProxyConfig config) {
         this.config = config;
@@ -92,6 +101,9 @@ public class ProxyLocalServer {
      * </p>
      */
     private Invoker buildInvokerChain() {
+        if (config.getNodeSelection() != null) {
+            return new com.proxy.local.config.Http3NodeController(config);
+        }
         // 1. 加载 SPI 组件
         Exchanger exchanger = ExtensionLoader.getLoader(Exchanger.class).getDefaultExtension();
         FilterChainBuilder chainBuilder = ExtensionLoader.getLoader(FilterChainBuilder.class).getDefaultExtension();
@@ -197,6 +209,7 @@ public class ProxyLocalServer {
      */
     public void shutdown() {
         log.info("Shutting down Proxy Local Server...");
+        if (nodeConfigWatcher != null) nodeConfigWatcher.close();
 
         // 0. 最先还原系统代理，避免关闭后用户断网
         disableSystemProxy();
@@ -216,7 +229,11 @@ public class ProxyLocalServer {
         }
 
         // 3. 关闭 DefaultFuture 时间轮，唤醒所有 pending Future
-        DefaultFuture.shutdown();
+        // The daemon timer is process-wide, not owned by this server instance.
+
+        if (clusterInvoker instanceof com.proxy.local.config.Http3NodeController) {
+            ((com.proxy.local.config.Http3NodeController) clusterInvoker).close();
+        }
 
         // 4. 关闭 ClusterInvoker 中的 Invoker（底层会关闭 ExchangeClient → Http2Connection）
         if (clusterInvoker instanceof ClusterInvoker) {
@@ -276,10 +293,16 @@ public class ProxyLocalServer {
         ProxyLocalServer server = new ProxyLocalServer(config);
 
         // 注册 shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(server::shutdown, "shutdown-hook"));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.shutdown();
+            DefaultFuture.shutdown();
+        }, "shutdown-hook"));
 
         try {
             server.start();
+            if (args.length > 0 && server.clusterInvoker instanceof com.proxy.local.config.Http3NodeController) {
+                server.watchNodeConfig(java.nio.file.Paths.get(args[0]));
+            }
             server.awaitTermination();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

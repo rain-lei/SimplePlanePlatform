@@ -74,6 +74,10 @@ const App = (function () {
       $('#info-mode').textContent = st.proxy_mode === 'tun' ? 'TUN 模式' : '系统代理';
       $('#info-port-status').textContent = st.proxy_port_listening ? '监听中' : '未监听';
       $('#info-transport').textContent = (localConfig?.remote?.transport || 'http3').toLowerCase();
+      const node = st.node_status;
+      $('#nodeApplyStatus').textContent = !node ? '代理未运行或尚未确认节点配置'
+        : node.error || (node.savedRevision !== node.appliedRevision ? '配置已保存，尚未应用'
+        : `当前生效节点：${node.currentNodeId} · ${nodeStateLabel(node.nodeStatus)} · 活跃流：${node.activeStreams} · 配置已应用`);
 
       // 系统代理状态
       const proxyRunning = st.proxy_status === 'running';
@@ -95,6 +99,10 @@ const App = (function () {
     const labels = { running: '运行中', starting: '启动中', stopped: '已停止', stopping: '停止中', error: '异常' };
     label.textContent = labels[status] || status;
     card.className = 'service-card ' + (status === 'running' ? 'card-running' : status === 'starting' ? 'card-starting' : status === 'error' ? 'card-error' : '');
+  }
+
+  function nodeStateLabel(state) {
+    return ({ idle: '等待建连', connecting: '连接中', available: '连接可用', unavailable: '节点不可用', stopped: '已停止' })[state] || '状态未知';
   }
 
   // ============================================================
@@ -256,7 +264,11 @@ const App = (function () {
     $('#httpProxyEnabled').checked = c.local.http_proxy_enabled;
 
     // 远端服务器
-    renderServerCards([c.remote]);
+    renderServerCards(c.nodes?.length ? c.nodes : [c.remote]);
+    const manualHttp3 = (c.nodes?.length ? c.nodes : [c.remote]).every(node => node.transport === 'http3');
+    ['cluster', 'loadBalance', 'timeoutMs', 'connectionsPerNode'].forEach(id => {
+      $(`#${id}`).closest('.form-row').hidden = manualHttp3;
+    });
 
     // 路由
     if (c.route) {
@@ -277,19 +289,32 @@ const App = (function () {
 
     // 收集服务器卡片
     const cards = $$('.server-card', $('#remoteServers'));
-    if (cards.length > 0) {
-      const card = cards[0];
-      localConfig.remote = {
-        ...localConfig.remote,
+    localConfig.nodes = cards.map(card => {
+      const http3 = { ...card.nodeConfig.http3 };
+      delete http3.serverName; delete http3.caFile; delete http3.certificatePin;
+      return {
+        ...card.nodeConfig,
+        id: card.dataset.nodeId,
+        name: val($('[data-key="name"]', card)),
         host: val($('[data-key="host"]', card)),
         port: parseInt(val($('[data-key="port"]', card))) || 9090,
         cipher: val($('[data-key="cipher"]', card)),
         key: val($('[data-key="key"]', card)),
         transport: val($('[data-key="transport"]', card)) || 'http3',
+        http3: { ...http3, server_name: val($('[data-key="serverName"]', card)),
+          ca_file: val($('[data-key="caFile"]', card)), certificate_pin: val($('[data-key="certificatePin"]', card)) },
       };
+    });
+    const selected = cards.find(card => $('[data-key="selected"]', card).checked);
+    localConfig.selected_node_id = selected?.dataset.nodeId || '';
+    if (selected) localConfig.remote = { ...localConfig.nodes.find(node => node.id === localConfig.selected_node_id) };
+    if (localConfig.nodes.length === 1 && localConfig.remote.transport === 'http2') {
+      localConfig.nodes = [];
+      localConfig.selected_node_id = '';
     }
 
     localConfig.route = {
+      ...localConfig.route,
       default_route: val('#defaultRoute'),
       proxy_list: parseLines('#proxyList'),
       direct_list: parseLines('#directList'),
@@ -299,12 +324,14 @@ const App = (function () {
   }
 
   async function saveAll() {
-    const configData = collectConfig();
     try {
+      if (!$('#remoteServers [data-key="selected"]:checked')) throw new Error('请至少添加并选择一个节点');
+      const configData = collectConfig();
       await invoke('save_config', { configData });
       originalConfigJson = JSON.stringify(configData);
       updateChangeState();
       toast('配置已保存', 'success');
+      $('#nodeApplyStatus').textContent = '配置已保存，等待运行时确认切换';
       addLog('success', '配置已保存');
     } catch (e) {
       toast(`保存失败: ${e}`, 'error');
@@ -319,17 +346,24 @@ const App = (function () {
     const container = $('#remoteServers');
     container.innerHTML = '';
     (servers || []).forEach((srv, i) => container.appendChild(createServerCard(srv, i)));
+    if (!$('[data-key="selected"]:checked', container) && $('[data-key="selected"]', container)) {
+      $('[data-key="selected"]', container).checked = true;
+    }
   }
 
   function createServerCard(srv, index) {
     const card = document.createElement('div');
     card.className = 'server-card';
+    card.dataset.nodeId = srv.id || (crypto.randomUUID ? crypto.randomUUID() : `node-${Date.now()}-${index}`);
+    card.nodeConfig = { ...srv };
     card.innerHTML = `
       <div class="server-card-header">
+        <label><input type="radio" name="selected-node" data-key="selected" ${localConfig?.selected_node_id === card.dataset.nodeId || (!localConfig?.selected_node_id && index === 0) ? 'checked' : ''}> 使用此节点</label>
         <span class="server-card-title"><span class="server-index">#${index + 1}</span> ${esc(srv.host || '?')}:${srv.port || '?'}</span>
         <button class="btn-sm btn-danger btn-remove" title="删除">×</button>
       </div>
       <div class="server-fields">
+        <div class="server-field"><label>节点名称</label><input class="input" value="${escAttr(srv.name || '')}" data-key="name"></div>
         <div class="server-field"><label>Host</label><input class="input" value="${escAttr(srv.host || '')}" data-key="host"></div>
         <div class="server-field"><label>Port</label><input class="input" type="number" value="${srv.port || 9090}" data-key="port"></div>
         <div class="server-field"><label>Transport</label>
@@ -340,6 +374,8 @@ const App = (function () {
         </div>
         <div class="server-field"><label>Cipher</label>
           <select class="select" data-key="cipher">
+            <option value="chacha20-poly1305-v2" ${srv.cipher === 'chacha20-poly1305-v2' ? 'selected' : ''}>chacha20-poly1305-v2</option>
+            <option value="aes-gcm-v2" ${srv.cipher === 'aes-gcm-v2' ? 'selected' : ''}>aes-gcm-v2</option>
             <option value="none" ${srv.cipher === 'none' ? 'selected' : ''}>none</option>
             <option value="aes-gcm" ${srv.cipher === 'aes-gcm' ? 'selected' : ''}>aes-gcm</option>
             <option value="chacha20" ${srv.cipher === 'chacha20' ? 'selected' : ''}>chacha20</option>
@@ -347,12 +383,21 @@ const App = (function () {
           </select>
         </div>
         <div class="server-field"><label>Key</label><input class="input" value="${escAttr(srv.key || '')}" data-key="key" type="password"></div>
+        <div class="server-field"><label>HTTP/3 证书域名（留空使用 Host）</label><input class="input" value="${escAttr(srv.http3?.server_name || srv.http3?.serverName || '')}" data-key="serverName"></div>
+        <div class="server-field"><label>HTTP/3 CA 路径（留空使用系统信任）</label><input class="input" value="${escAttr(srv.http3?.ca_file ?? srv.http3?.caFile ?? 'http3-remote-ca.crt')}" data-key="caFile"></div>
+        <div class="server-field"><label>HTTP/3 证书公钥指纹（可选）</label><input class="input" value="${escAttr(srv.http3?.certificate_pin || srv.http3?.certificatePin || '')}" data-key="certificatePin"></div>
       </div>`;
     $$('input, select', card).forEach(el => {
       el.addEventListener('input', markChanged);
       el.addEventListener('change', markChanged);
     });
-    $('.btn-remove', card).addEventListener('click', () => { card.remove(); markChanged(); });
+    $('.btn-remove', card).addEventListener('click', () => {
+      card.remove();
+      if (!$('#remoteServers [data-key="selected"]:checked') && $('#remoteServers [data-key="selected"]')) {
+        $('#remoteServers [data-key="selected"]').checked = true;
+      }
+      markChanged();
+    });
     return card;
   }
 
@@ -506,7 +551,7 @@ const App = (function () {
     } catch (e) {
       // 降级到直接应用
       const cfg = p.config || p;
-      localConfig = { local: cfg.local, remote: cfg.remote, route: cfg.route };
+      localConfig = { ...cfg };
       populateConfigForm(localConfig);
       markChanged();
       toast(`已加载预设 "${p.name}" (本地)`, 'success');

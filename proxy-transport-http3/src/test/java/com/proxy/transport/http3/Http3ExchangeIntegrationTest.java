@@ -28,6 +28,60 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class Http3ExchangeIntegrationTest {
     @ParameterizedTest
     @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
+    void independentClientsShareBrowserRegistryWithoutCrossConnectionCleanup(String suite) throws Exception {
+        Http3LoopbackIntegrationTest.TestCertificates certificate =
+                Http3LoopbackIntegrationTest.TestCertificates.create();
+        int port;
+        try (DatagramSocket socket = new DatagramSocket(0)) { port = socket.getLocalPort(); }
+        URL serverUrl = new URL("proxy", "localhost", port).addParameter("transport", "http3")
+                .addParameter("cipher", suite).addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
+                .addParameter("http3.certificateFile", certificate.certificate().getAbsolutePath())
+                .addParameter("http3.privateKeyFile", certificate.privateKey().getAbsolutePath());
+        Http3Server server = new Http3Server(serverUrl,
+                new ExchangeHandler(invocation -> CompletableFuture.completedFuture(Response.ok())));
+        ExchangeClient a = null, b = null;
+        io.netty.channel.embedded.EmbeddedChannel browserA = new io.netty.channel.embedded.EmbeddedChannel(
+                new ChannelInboundHandlerAdapter());
+        io.netty.channel.embedded.EmbeddedChannel browserB = new io.netty.channel.embedded.EmbeddedChannel(
+                new ChannelInboundHandlerAdapter());
+        try {
+            server.start();
+            URL clientUrl = new URL("proxy", "localhost", port).addParameter("transport", "http3")
+                    .addParameter("cipher", suite).addParameter("cipherKey", "0123456789abcdef0123456789abcdef")
+                    .addParameter("http3.caFile", certificate.ca().getAbsolutePath());
+            a = new HeaderExchanger().connect(clientUrl);
+            b = new HeaderExchanger().connect(clientUrl);
+            java.util.concurrent.ConcurrentHashMap<Long, ChannelHandlerContext> registry =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+            registry.put(701L, browserA.pipeline().firstContext());
+            registry.put(702L, browserB.pipeline().firstContext());
+            a.setStreamRegistry(registry);
+            b.setStreamRegistry(registry);
+            CompletableFuture<Response> connectA = a.request(ProxyMessage.builder().streamId(701)
+                    .type(ProxyMessage.MessageType.CONNECT).host("example.com").port(443).build(), 5000);
+            CompletableFuture<Response> connectB = b.request(ProxyMessage.builder().streamId(702)
+                    .type(ProxyMessage.MessageType.CONNECT).host("example.com").port(443).build(), 5000);
+            assertTrue(connectA.get(10, TimeUnit.SECONDS).isSuccess());
+            assertTrue(connectB.get(10, TimeUnit.SECONDS).isSuccess());
+            a.close();
+            browserA.runPendingTasks();
+            org.junit.jupiter.api.Assertions.assertFalse(browserA.isActive());
+            assertTrue(browserB.isActive());
+            assertTrue(b.isAvailable());
+            assertTrue(b.request(ProxyMessage.builder().streamId(702)
+                    .type(ProxyMessage.MessageType.DISCONNECT).build(), 5000)
+                    .get(10, TimeUnit.SECONDS).isSuccess());
+        } finally {
+            if (a != null) a.close();
+            if (b != null) b.close();
+            server.close();
+            browserA.finishAndReleaseAll();
+            browserB.finishAndReleaseAll();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "chacha20-poly1305-v2", "aes-gcm-v2"})
     void exchangeHandlerAcceptsDataAfterConnectOnTheSameHttp3Stream(String suite) throws Exception {
         Http3LoopbackIntegrationTest.TestCertificates certificate =
                 Http3LoopbackIntegrationTest.TestCertificates.create();
