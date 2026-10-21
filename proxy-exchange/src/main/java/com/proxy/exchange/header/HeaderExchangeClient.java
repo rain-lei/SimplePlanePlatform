@@ -33,9 +33,6 @@ public class HeaderExchangeClient implements ExchangeClient {
     private final URL url;
     private final ExchangeHandler exchangeHandler;
     private volatile boolean closed = false;
-    private final String connectionId = java.util.UUID.randomUUID().toString();
-
-    @Override public String getConnectionId() { return connectionId; }
 
     public HeaderExchangeClient(Client client, URL url, ExchangeHandler exchangeHandler) {
         this.client = client;
@@ -65,13 +62,12 @@ public class HeaderExchangeClient implements ExchangeClient {
 
         // Register before send: even an immediate write failure must release the stream.
         future.whenComplete((response, error) -> {
-            if (message.getType() == ProxyMessage.MessageType.CONNECT
-                    && (error != null || response == null || !response.isSuccess()) && exchangeHandler != null) {
+            boolean connectFailed = message.getType() == ProxyMessage.MessageType.CONNECT
+                    && (error != null || response == null || !response.isSuccess());
+            if (connectFailed && exchangeHandler != null) {
                 exchangeHandler.abandonConnect(message.getStreamId());
             }
-            if (message.getType() == ProxyMessage.MessageType.DISCONNECT
-                    || (message.getType() == ProxyMessage.MessageType.CONNECT
-                    && (error != null || response == null || !response.isSuccess()))) {
+            if (connectFailed || message.getType() == ProxyMessage.MessageType.DISCONNECT) {
                 client.closeStream(message.getStreamId());
             }
         });

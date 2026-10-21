@@ -34,7 +34,6 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final java.util.concurrent.Semaphore pendingConnects = new java.util.concurrent.Semaphore(128);
     private volatile ProxyConfig snapshot;
-    private volatile long generation;
     private volatile String nodeStatus = "idle";
 
     public Http3NodeController(ProxyConfig config) {
@@ -43,7 +42,6 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
     }
 
     public String getCurrentNodeId() { return snapshot.getNodeSelection().getSelectedNodeId(); }
-    public long getGeneration() { return generation; }
     public int getBindingCount() { return sticky.getBindingCount(); }
     public String getNodeStatus() {
         if (closed.get()) return "stopped";
@@ -56,7 +54,6 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         CompletableFuture<Void> result = new CompletableFuture<>();
         submit(() -> {
             if (!selectionKey(snapshot).equals(selectionKey(next))) {
-                generation++;
                 sticky.setInvokers(Collections.emptyList());
                 sticky.retireBindings();
                 closeClient();
@@ -86,7 +83,6 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         try { streamId = Long.parseLong(String.valueOf(rawStreamId)); }
         catch (NumberFormatException invalid) { return CompletableFuture.completedFuture(Response.error("Invalid streamId")); }
         if (!pendingConnects.tryAcquire()) return CompletableFuture.completedFuture(Response.error("Local CONNECT queue full"));
-        long requestedGeneration = generation;
         long started = System.nanoTime();
         CompletableFuture<Response> result = new CompletableFuture<>();
         result.whenComplete((response, failure) -> pendingConnects.release());
@@ -102,9 +98,8 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         });
         submit(() -> {
             if (result.isDone()) return;
-            if (requestedGeneration != generation
-                    || TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= snapshot.getTimeoutMs()) {
-                result.complete(Response.error("Node selection changed or CONNECT budget expired"));
+            if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= snapshot.getTimeoutMs()) {
+                result.complete(Response.error("CONNECT budget expired"));
                 return;
             }
             if (client == null) createSelectedConnection(started + TimeUnit.MILLISECONDS.toNanos(snapshot.getTimeoutMs()));
@@ -115,11 +110,6 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
                 return;
             }
             invocation.setAttachment("requestTimeoutMs", remaining);
-            invocation.setAttachment("nodeId", getCurrentNodeId());
-            if (closed.get() || requestedGeneration != generation) {
-                result.complete(Response.error("Node selection changed"));
-                return;
-            }
             sticky.invoke(invocation).whenComplete((response, failure) -> {
                 if (failure != null) result.completeExceptionally(failure);
                 else result.complete(response);
@@ -186,7 +176,6 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
     public void close() {
         if (closed.compareAndSet(false, true)) {
             coordinator.execute(() -> {
-                generation++;
                 sticky.setInvokers(Collections.emptyList());
                 sticky.retireBindings();
                 closeClient();

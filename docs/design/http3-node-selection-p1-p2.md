@@ -57,7 +57,7 @@ Dashboard、桌面端和仓库启动脚本会传入配置路径。无参数启�
 ## 运行规则
 
 - CONNECT 选择具体 Invoker；DATA、DISCONNECT 仅使用原绑定，不重新负载均衡，也不重放 DATA。
-- 绑定记录 stream、节点、具体连接标识及物理连接代次。父连接断开只失败所属请求和流；重连使用新代次，旧流不能接续。
+- 绑定仅保存流对应的 Invoker 和建流是否完成。连接断开时清理所属请求和流；重连后由应用重新建流，不接续旧流。
 - 手动模式不会使用备用节点兜底。所选节点暂时不可达仍可应用选择，面板显示等待建连或节点不可用，实际建流失败会返回错误。
 - 改变所选节点、当前节点连接参数或建流超时会释放旧资源；仅更改备用节点、名称或不参与 HTTP/3 选择的负载均衡字段，不关闭当前健康流。
 - CONNECT 在协调线程中建立传输，最多容纳 128 个待完成建流请求。排队、传输握手和控制请求共享建流预算；取消后不再后台建流。
@@ -90,7 +90,7 @@ python scripts/test-node-selection-ui.py
 |---|---|
 | `StickyClusterInvokerTest` | 固定连接、DATA 不改投、重复/失败 CONNECT 清理、迟到成功不复活 |
 | `ConnectionOwnershipTest` | 多连接共享注册表的精确清理、响应来源校验、早到数据等待握手 |
-| `NodeSelectionConfigTest` | 旧配置迁移、无效配置拒绝、仅受影响节点推进资源代次 |
+| `NodeSelectionConfigTest` | 旧配置迁移、无效配置拒绝、备用节点编辑与手动选择应用 |
 | `Http3ExchangeIntegrationTest` | 两个独立 QUIC 客户端共享注册表；关闭 A 后 B 正常；三种加密套件隔离 |
 | `Http3ManualSwitchIntegrationTest` | 浏览器 TCP → local → 两个真实 HTTP/3 remote → 目标 TCP；A 切 B、备用节点编辑不打断当前流、非法配置保留旧流、128 KiB 分片字节比对、普通 HTTP 首包、远端 session/Future 回收 |
 | 同一全链路测试的独立进程用例 | 从 Java main 启动 local，验证状态文件、配置热加载、HTTP CONNECT/SOCKS5 与提前业务字节 |
@@ -110,3 +110,7 @@ python scripts/test-node-selection-ui.py
 本地验收日志位于 `.build/node-selection-final.log`、`.build/node-selection-dashboard.log` 和 `.build/node-selection-jar-smoke.log`。P3 的自动切换、熔断和探测不在本次验收范围内。
 
 单连接简化后重新执行完整 Java `verify`，仍为 192 个用例、0 失败、0 错误、3 个条件跳过，包含三种加密套件及独立进程的真实切换链路，10 类生命周期检查各完成 8 次。新增断言拒绝多连接配置，并确认无关负载均衡字段不触发连接重建。Dashboard 29 个测试和两个页面的浏览器冒烟也重新通过。对应日志为 `.build/http3-single-connection-verify.log` 和 `.build/http3-single-connection-dashboard.log`。
+
+进一步精简：移除连接 UUID、物理连接代次、绑定诊断元数据和切换代次判断；保留 `StickyClusterInvoker` 的 ClusterInvoker 接口、SPI 及流绑定；当前 HTTP/3 只向其提供所选节点的一个 Invoker。配置应用和建连由同一个协调线程按顺序执行。保留配置监听、旧连接及流的清理、超时取消和浏览器握手前的数据暂存。
+
+这轮精简后完整 Java `verify` 再次通过：192 个用例，0 失败、0 错误、3 个条件跳过，10 类 HTTP/3 生命周期各循环 8 次并完成资源回收，真实三套加密及独立进程切换用例全部通过。日志为 `.build/http3-simplified-verify.log`。

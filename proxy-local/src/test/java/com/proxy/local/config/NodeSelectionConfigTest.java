@@ -60,17 +60,16 @@ class NodeSelectionConfigTest {
         assertEquals("legacy-node", legacy.getRemoteServers().get(0).getId());
     }
 
-    @Test void onlyAffectedSelectionAdvancesResourceGeneration() throws Exception {
+    @Test void backupEditsAndSelectionChangesAreApplied() throws Exception {
         Http3NodeController controller = new Http3NodeController(config("a"));
         try {
             ProxyConfig backupChanged = config("a");
             backupChanged.getRemoteServers().get(1).setPort(9191);
             backupChanged.setLoadBalance("unused-for-single-http3-connection");
             controller.apply(backupChanged).get(2, TimeUnit.SECONDS);
-            assertEquals(0, controller.getGeneration());
+            assertEquals("a", controller.getCurrentNodeId());
             controller.apply(config("b")).get(2, TimeUnit.SECONDS);
             assertEquals("b", controller.getCurrentNodeId());
-            assertEquals(1, controller.getGeneration());
             assertThrows(IllegalArgumentException.class, () -> controller.apply(config("missing")));
             assertEquals("b", controller.getCurrentNodeId());
         } finally { controller.close(); }

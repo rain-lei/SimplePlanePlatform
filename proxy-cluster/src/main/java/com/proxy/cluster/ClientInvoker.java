@@ -37,10 +37,6 @@ public class ClientInvoker implements Invoker {
         }
 
         // 构建 ProxyMessage
-        if (invocation.getType() == ProxyMessage.MessageType.CONNECT) {
-            invocation.setAttachment("connectionId", exchangeClient.getConnectionId());
-            invocation.setAttachment("connectionGeneration", exchangeClient.getClient().getConnectionGeneration());
-        }
         ProxyMessage message = new ProxyMessage();
         message.setType(invocation.getType());
         message.setHost(invocation.getTargetHost());

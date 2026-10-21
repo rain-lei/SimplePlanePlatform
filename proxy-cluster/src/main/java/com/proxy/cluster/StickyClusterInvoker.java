@@ -22,9 +22,6 @@ public final class StickyClusterInvoker implements ClusterInvoker {
     private static final class Binding {
         final Invoker invoker;
         volatile boolean active;
-        volatile String nodeId;
-        volatile String connectionId;
-        volatile long generation;
         Binding(Invoker invoker) { this.invoker = invoker; }
     }
 
@@ -46,10 +43,6 @@ public final class StickyClusterInvoker implements ClusterInvoker {
             CompletableFuture<Response> result;
             try {
                 result = selected.invoke(invocation);
-                binding.nodeId = (String) invocation.getAttachment("nodeId");
-                binding.connectionId = (String) invocation.getAttachment("connectionId");
-                Number generation = (Number) invocation.getAttachment("connectionGeneration");
-                binding.generation = generation == null ? 0 : generation.longValue();
             } catch (RuntimeException failure) {
                 bindings.remove(streamId, binding);
                 return failed(failure);
@@ -96,19 +89,6 @@ public final class StickyClusterInvoker implements ClusterInvoker {
     }
 
     public int getBindingCount() { return bindings.size(); }
-
-    /** Diagnostic metadata only: no transport objects or credentials escape the binding owner. */
-    public java.util.Map<String, Object> getBindingMetadata(long streamId) {
-        Binding binding = bindings.get(streamId);
-        if (binding == null) return Collections.emptyMap();
-        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>();
-        metadata.put("streamId", streamId);
-        metadata.put("nodeId", binding.nodeId);
-        metadata.put("connectionId", binding.connectionId);
-        metadata.put("generation", binding.generation);
-        metadata.put("state", binding.active ? "ACTIVE" : "CONNECTING");
-        return Collections.unmodifiableMap(metadata);
-    }
 
     private static CompletableFuture<Response> error(String message) {
         return CompletableFuture.completedFuture(Response.error(message));
