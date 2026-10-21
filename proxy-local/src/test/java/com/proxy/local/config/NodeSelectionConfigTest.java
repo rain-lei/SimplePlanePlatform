@@ -3,7 +3,6 @@ package com.proxy.local.config;
 import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 class NodeSelectionConfigTest {
@@ -14,6 +13,7 @@ class NodeSelectionConfigTest {
         node.setPort(port);
         node.setTransport("http3");
         node.setCipher("none");
+        node.getHttp3().setHandshakeTimeoutMs(100);
         return node;
     }
 
@@ -66,9 +66,9 @@ class NodeSelectionConfigTest {
             ProxyConfig backupChanged = config("a");
             backupChanged.getRemoteServers().get(1).setPort(9191);
             backupChanged.setLoadBalance("unused-for-single-http3-connection");
-            controller.apply(backupChanged).get(2, TimeUnit.SECONDS);
+            controller.apply(backupChanged);
             assertEquals("a", controller.getCurrentNodeId());
-            controller.apply(config("b")).get(2, TimeUnit.SECONDS);
+            controller.apply(config("b"));
             assertEquals("b", controller.getCurrentNodeId());
             assertThrows(IllegalArgumentException.class, () -> controller.apply(config("missing")));
             assertEquals("b", controller.getCurrentNodeId());

@@ -452,9 +452,6 @@ const App = (function () {
           </select>
         </div>
         <div class="server-field"><label>Key</label><input class="input" value="${escAttr(srv.cipherKey || '')}" data-key="cipherKey"></div>
-        <div class="server-field"><label>HTTP/3 证书域名（留空使用 Host）</label><input class="input" value="${escAttr(srv.http3?.serverName || '')}" data-key="serverName"></div>
-        <div class="server-field"><label>HTTP/3 CA 路径（留空使用系统信任）</label><input class="input" value="${escAttr(srv.http3?.caFile || '')}" data-key="caFile"></div>
-        <div class="server-field"><label>HTTP/3 证书公钥指纹（可选）</label><input class="input" value="${escAttr(srv.http3?.certificatePin || '')}" data-key="certificatePin"></div>
         <div class="server-field"><label>SSL</label>
           <label class="toggle"><input type="checkbox" ${srv.ssl ? 'checked' : ''} data-key="ssl"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
         </div>
@@ -585,8 +582,6 @@ const App = (function () {
         cipher: val($('[data-key="cipher"]', card)),
         cipherKey: val($('[data-key="cipherKey"]', card)),
         ssl: $('[data-key="ssl"]', card).checked,
-        http3: { ...previous.http3, serverName: val($('[data-key="serverName"]', card)),
-          caFile: val($('[data-key="caFile"]', card)), certificatePin: val($('[data-key="certificatePin"]', card)) },
       });
     });
     if (localConfig) {

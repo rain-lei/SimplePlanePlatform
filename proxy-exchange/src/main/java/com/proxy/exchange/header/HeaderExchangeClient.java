@@ -62,12 +62,9 @@ public class HeaderExchangeClient implements ExchangeClient {
 
         // Register before send: even an immediate write failure must release the stream.
         future.whenComplete((response, error) -> {
-            boolean connectFailed = message.getType() == ProxyMessage.MessageType.CONNECT
-                    && (error != null || response == null || !response.isSuccess());
-            if (connectFailed && exchangeHandler != null) {
-                exchangeHandler.abandonConnect(message.getStreamId());
-            }
-            if (connectFailed || message.getType() == ProxyMessage.MessageType.DISCONNECT) {
+            if (message.getType() == ProxyMessage.MessageType.DISCONNECT
+                    || (message.getType() == ProxyMessage.MessageType.CONNECT
+                    && (error != null || response == null || !response.isSuccess()))) {
                 client.closeStream(message.getStreamId());
             }
         });
@@ -95,7 +92,6 @@ public class HeaderExchangeClient implements ExchangeClient {
         }
         // 数据面：不生成 requestId、不创建 Future，仅依赖 streamId 发后即忘
         message.setRequestId(0);
-        if (exchangeHandler != null) exchangeHandler.trackStream(message.getStreamId());
         try {
             client.send(message);
         } catch (Exception e) {
@@ -129,14 +125,6 @@ public class HeaderExchangeClient implements ExchangeClient {
     @Override
     public void setStreamClosedListener(java.util.function.LongConsumer listener) {
         if (exchangeHandler != null) exchangeHandler.setStreamClosedListener(listener);
-    }
-
-    @Override public void deferDownstream(long streamId) {
-        if (exchangeHandler != null) exchangeHandler.deferDownstream(streamId);
-    }
-
-    @Override public void activateDownstream(long streamId) {
-        if (exchangeHandler != null) exchangeHandler.activateDownstream(streamId);
     }
 
     @Override

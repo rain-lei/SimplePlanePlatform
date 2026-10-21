@@ -41,7 +41,7 @@ public final class NodeConfigWatcher implements AutoCloseable {
         if (!startupSettings.equals(nonNodeSettings(initial))) {
             throw new IllegalArgumentException("Non-node settings changed during startup; restart required");
         }
-        controller.apply(initial).get();
+        controller.apply(initial);
         observedDigest = appliedDigest = digest(bytes);
         publish(true);
         scheduler.scheduleWithFixedDelay(this::poll, 500, 500, TimeUnit.MILLISECONDS);
@@ -64,7 +64,7 @@ public final class NodeConfigWatcher implements AutoCloseable {
                     if (!startupSettings.equals(nonNodeSettings(next))) {
                         throw new IllegalArgumentException("Non-node configuration changes require restart");
                     }
-                    controller.apply(next).get();
+                    controller.apply(next);
                     appliedDigest = nextDigest;
                     error = "";
                 } catch (Exception failure) {

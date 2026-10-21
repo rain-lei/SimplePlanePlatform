@@ -97,6 +97,8 @@ class Http3ManualSwitchIntegrationTest {
             echo(browserA, "before-switch");
             assertEquals(1, connectsA.get());
             assertEquals(0, connectsB.get());
+            assertEquals(1, a.getActiveConnectionCount(), "Only one client connection is needed per node");
+            assertEquals(0, b.getActiveConnectionCount(), "Backup nodes must not be preconnected");
             String backupOnlyChange = initial.replace("id: b\n", "id: b\n    name: renamed-backup\n");
             Files.write(config, backupOnlyChange.getBytes(StandardCharsets.UTF_8));
             awaitStatus(config, "\"appliedRevision\":\"" + digest(backupOnlyChange) + "\"");
@@ -112,6 +114,7 @@ class Http3ManualSwitchIntegrationTest {
             echo(browserB, "after-switch");
             assertEquals(1, connectsA.get());
             assertEquals(1, connectsB.get());
+            assertEquals(1, b.getActiveConnectionCount());
             byte[] fragmented = new byte[131072];
             new java.util.Random(7).nextBytes(fragmented);
             for (int offset = 0; offset < fragmented.length; offset += 1023) {
@@ -123,6 +126,14 @@ class Http3ManualSwitchIntegrationTest {
             Files.write(config, yaml(localPort, portA, portB, certificate, "missing", suite).getBytes(StandardCharsets.UTF_8));
             awaitStatus(config, "Configuration not applied");
             echo(browserB, "still-on-b");
+            String changedCurrent = yaml(localPort, portA, portB, certificate, "b", suite)
+                    .replace("timeoutMs: 5000", "timeoutMs: 6000");
+            Files.write(config, changedCurrent.getBytes(StandardCharsets.UTF_8));
+            awaitStatus(config, "\"appliedRevision\":\"" + digest(changedCurrent) + "\"");
+            assertEquals(-1, browserB.getInputStream().read(), "Changed current-node parameters retire its flows");
+            assertEquals(0, dispatchB.getSessionManager().activeCount());
+            browserB = connect(localPort, targetPort);
+            echo(browserB, "reconnected-after-current-node-edit");
             browserB.close();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (System.nanoTime() < deadline && (dispatchA.getSessionManager().activeCount() != 0
@@ -211,12 +222,11 @@ class Http3ManualSwitchIntegrationTest {
         request.write(host);
         request.write((targetPort >> 8) & 255);
         request.write(targetPort & 255);
-        request.write("early".getBytes(StandardCharsets.US_ASCII));
         browser.getOutputStream().write(request.toByteArray());
         byte[] reply = readBytes(browser.getInputStream(), 10);
         assertEquals(5, reply[0]);
         assertEquals(0, reply[1]);
-        assertArrayEquals("early".getBytes(StandardCharsets.US_ASCII), readBytes(browser.getInputStream(), 5));
+        echo(browser, "after-socks-handshake");
         return browser;
     }
 

@@ -37,7 +37,7 @@ import java.nio.charset.StandardCharsets;
  * 远程连接目标成功后回复 SOCKS5 成功响应，然后切换到 RelayHandler 双向转发。
  * </p>
  */
-public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDecoder {
+public class Socks5ConnectHandler extends ChannelInboundHandlerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(Socks5ConnectHandler.class);
 
@@ -57,7 +57,6 @@ public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDe
     private final Invoker invoker;
     private final RouteRule routeRule;
     private final StreamChannelRegistry streamRegistry = StreamChannelRegistry.getInstance();
-    private boolean connectPending;
 
     public Socks5ConnectHandler(Invoker invoker, RouteRule routeRule) {
         this.invoker = invoker;
@@ -65,26 +64,17 @@ public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDe
     }
 
     @Override
-    protected void decode(ChannelHandlerContext ctx, ByteBuf buf, java.util.List<Object> out) throws Exception {
-        if (buf.readableBytes() > 1048576) {
-            ctx.close();
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (!(msg instanceof ByteBuf)) {
+            ctx.fireChannelRead(msg);
             return;
         }
-        if (connectPending) return;
-        {
+
+        ByteBuf buf = (ByteBuf) msg;
+        try {
             if (buf.readableBytes() < 4) {
                 return;
             }
-            int offset = buf.readerIndex();
-            int addressType = buf.getUnsignedByte(offset + 3);
-            int required = 4;
-            if (addressType == ATYP_IPV4) required = 10;
-            else if (addressType == ATYP_IPV6) required = 22;
-            else if (addressType == ATYP_DOMAIN) {
-                if (buf.readableBytes() < 5) return;
-                required = 7 + buf.getUnsignedByte(offset + 4);
-            }
-            if (buf.readableBytes() < required) return;
 
             byte version = buf.readByte();
             byte cmd = buf.readByte();
@@ -137,7 +127,6 @@ public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDe
             }
 
             int targetPort = buf.readUnsignedShort();
-            connectPending = true;
 
             log.info("SOCKS5 CONNECT request: {}:{} from {}", targetHost, targetPort, ctx.channel().remoteAddress());
 
@@ -184,11 +173,8 @@ public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDe
                 // 通过 ClusterInvoker 向远程发送 CONNECT 请求
                 Invocation invocation = new Invocation(targetHost, targetPort, null, ProxyMessage.MessageType.CONNECT);
                 invocation.setAttachment("streamId", streamId);
-                invocation.setAttachment("deferDownstream", true);
-                ctx.channel().config().setAutoRead(false);
 
-                invoker.invoke(invocation).whenCompleteAsync((response, throwable) -> {
-                    if (!ctx.channel().isActive()) return;
+                invoker.invoke(invocation).whenComplete((response, throwable) -> {
                     if (throwable != null) {
                         log.error("CONNECT failed for {}:{}", host, port, throwable);
                         streamRegistry.unregister(streamId);
@@ -200,13 +186,10 @@ public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDe
                     if (response != null && response.isSuccess()) {
                         // 连接成功，回复 SOCKS5 成功
                         sendReply(ctx, REP_SUCCESS);
-                        Runnable activate = (Runnable) invocation.getAttachment("activateDownstream");
-                        if (activate != null) activate.run();
 
                         // 切换到 Relay 模式
                         ctx.pipeline().addLast("relay", new RelayHandler(invoker, host, port, streamId));
                         ctx.pipeline().remove(Socks5ConnectHandler.this);
-                        ctx.channel().config().setAutoRead(true);
 
                         log.info("SOCKS5 tunnel established: {}:{}, streamId={}", host, port, streamId);
                     } else {
@@ -216,8 +199,10 @@ public class Socks5ConnectHandler extends io.netty.handler.codec.ByteToMessageDe
                         sendReply(ctx, REP_HOST_UNREACHABLE);
                         ctx.close();
                     }
-                }, ctx.executor());
+                });
             }
+        } finally {
+            buf.release();
         }
     }
 

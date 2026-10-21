@@ -18,13 +18,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 通过 ExchangeClient.request() 发送并返回 Future。
  * </p>
  */
-public class ClientInvoker implements Invoker {
+public class ClientInvoker implements Invoker, AutoCloseable {
 
     private final ExchangeClient exchangeClient;
+    private final String nodeId;
     private final long timeoutMs;
     private final AtomicInteger activeCount = new AtomicInteger(0);
 
     public ClientInvoker(ExchangeClient exchangeClient, long timeoutMs) {
+        this(exchangeClient, timeoutMs, null);
+    }
+
+    public ClientInvoker(ExchangeClient exchangeClient, long timeoutMs, String nodeId) {
+        this.nodeId = nodeId;
         this.exchangeClient = exchangeClient;
         this.timeoutMs = timeoutMs;
     }
@@ -52,12 +58,6 @@ public class ClientInvoker implements Invoker {
         }
 
         // 数据面（DATA）：发后即忘，不生成 requestId/Future。
-        if (invocation.getType() == ProxyMessage.MessageType.CONNECT
-                && Boolean.TRUE.equals(invocation.getAttachment("deferDownstream"))) {
-            exchangeClient.deferDownstream(message.getStreamId());
-            invocation.setAttachment("activateDownstream", (Runnable) () ->
-                    exchangeClient.activateDownstream(message.getStreamId()));
-        }
         // 上行数据仅依赖 streamId 寻址，服务端回包由 ExchangeHandler 按 streamId 路由写回浏览器。
         if (invocation.getType() == ProxyMessage.MessageType.DATA) {
             exchangeClient.send(message);
@@ -69,13 +69,17 @@ public class ClientInvoker implements Invoker {
         // 活跃计数 +1
         activeCount.incrementAndGet();
 
-        Number requestTimeout = (Number) invocation.getAttachment("requestTimeoutMs");
-        return exchangeClient.request(message, requestTimeout == null ? timeoutMs : requestTimeout.longValue())
+        return exchangeClient.request(message, timeoutMs)
                 .whenComplete((response, throwable) -> {
                     // 活跃计数 -1
                     activeCount.decrementAndGet();
                 });
     }
+
+    public String getNodeId() { return nodeId; }
+
+    @Override
+    public void close() { exchangeClient.close(); }
 
     @Override
     public boolean isAvailable() {

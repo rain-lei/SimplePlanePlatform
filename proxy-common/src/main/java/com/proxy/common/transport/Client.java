@@ -24,6 +24,7 @@ import com.proxy.common.model.ProxyMessage;
  * </p>
  */
 public interface Client {
+
     /**
      * 发送消息
      * <p>

@@ -2,7 +2,7 @@
 
 本文对应 [改造方案](node-selection-and-failover-plan.md) 的 P1、P2。范围是 Java local 的 HTTP/3 代理链路、Web Dashboard 与桌面端；HTTP/2 继续沿用原有选择逻辑。自动故障切换、节点熔断与恢复探测属于 P3。
 
-HTTP/3 每个节点固定一条 QUIC 连接，配置要求 `connectionsPerNode: 1`。仅按需连接当前所选节点，不预建备用节点连接；节点内部不再进行连接池管理或负载均衡。
+HTTP/3 每个节点固定一条 QUIC 连接，配置要求 `connectionsPerNode: 1`。仅连接当前所选节点，不预建备用节点连接；节点内部不再进行连接池管理或负载均衡。
 
 ## 使用
 
@@ -57,11 +57,11 @@ Dashboard、桌面端和仓库启动脚本会传入配置路径。无参数启�
 ## 运行规则
 
 - CONNECT 选择具体 Invoker；DATA、DISCONNECT 仅使用原绑定，不重新负载均衡，也不重放 DATA。
-- 绑定仅保存流对应的 Invoker 和建流是否完成。连接断开时清理所属请求和流；重连后由应用重新建流，不接续旧流。
+- 绑定保存流对应的 Invoker、断开请求所需的原目标地址及建流是否完成。连接断开时清理所属请求和流；重连后由应用重新建流，不接续旧流。
 - 手动模式不会使用备用节点兜底。所选节点暂时不可达仍可应用选择，面板显示等待建连或节点不可用，实际建流失败会返回错误。
 - 改变所选节点、当前节点连接参数或建流超时会释放旧资源；仅更改备用节点、名称或不参与 HTTP/3 选择的负载均衡字段，不关闭当前健康流。
-- CONNECT 在协调线程中建立传输，最多容纳 128 个待完成建流请求。排队、传输握手和控制请求共享建流预算；取消后不再后台建流。
-- 入口 HTTP CONNECT、SOCKS5 成功响应入队后才放行早到的下行数据。早到下行最多缓存 1 MiB/1024 帧，入口建流阶段缓存同样有大小限制。
+- 启动和配置应用线程负责建立所选节点的一条连接。浏览器请求直接进入 ClusterInvoker，不经过额外的 CONNECT 队列、信号量或预算透传。
+- HTTP CONNECT 和 SOCKS5 处理恢复到改造前 `ef91d0d`，沿用同步回调；没有 DownstreamGate、额外下行缓存、暂停读取或 SOCKS5 解码器重写。
 - 本次没有加入自动重试策略、熔断或主动探测；单次建流失败向应用报错，由应用重连。
 
 ## 配置应用与状态
@@ -89,32 +89,28 @@ python scripts/test-node-selection-ui.py
 | 测试 | 验证范围 |
 |---|---|
 | `StickyClusterInvokerTest` | 固定连接、DATA 不改投、重复/失败 CONNECT 清理、迟到成功不复活 |
-| `ConnectionOwnershipTest` | 多连接共享注册表的精确清理、响应来源校验、早到数据等待握手 |
+| `ConnectionOwnershipTest` | 整连接关闭时只清理所属流；原同步 CONNECT 回调先提交握手响应，再处理后续 DATA |
 | `NodeSelectionConfigTest` | 旧配置迁移、无效配置拒绝、备用节点编辑与手动选择应用 |
 | `Http3ExchangeIntegrationTest` | 两个独立 QUIC 客户端共享注册表；关闭 A 后 B 正常；三种加密套件隔离 |
 | `Http3ManualSwitchIntegrationTest` | 浏览器 TCP → local → 两个真实 HTTP/3 remote → 目标 TCP；A 切 B、备用节点编辑不打断当前流、非法配置保留旧流、128 KiB 分片字节比对、普通 HTTP 首包、远端 session/Future 回收 |
-| 同一全链路测试的独立进程用例 | 从 Java main 启动 local，验证状态文件、配置热加载、HTTP CONNECT/SOCKS5 与提前业务字节 |
+| 同一全链路测试的独立进程用例 | 从 Java main 启动 local，验证状态文件、配置热加载、正常 HTTP CONNECT/SOCKS5 握手与业务数据 |
 | Dashboard `node-selection.test.js` | 节点校验、YAML 保留、原子替换、状态过期与候选节点 TUN 豁免 |
 | Rust `config::node_tests` | 桌面端旧配置迁移、多节点 YAML/密钥转义、错误选择拒绝、导入 ID 与证书参数保留 |
 
 桌面应用的原生编译与 Rust 配置测试交给 GitHub 的桌面构建流程，本地页面冒烟不代表原生应用已编译成功。验证使用独立回环节点、临时证书和临时配置，测试配置关闭系统代理。
 
-## 本次验收记录
+## 最小实现与验证
 
-- Java reactor `verify` 与 JAR 打包成功：192 个用例，189 个通过，3 个按原有条件跳过，无失败；排除了依赖外部百度站点的 `BaiduProxyTest`。
-- 显式开启 HTTP/3 生命周期诊断：10 类关闭、取消及失败场景各循环 8 次，结束后客户端流、远端流、session 和目标连接均回到 0。对应参数为 `-Dhttp3.lifecycle.probe=true -Dhttp3.lifecycle.limit=4 -Dhttp3.lifecycle.cycles=8`。
-- Dashboard 的 29 个 Node 测试全部通过；桌面和 Dashboard 的真实页面 JavaScript 浏览器冒烟通过，覆盖多节点选择、保存、TLS 参数及 v2 加密套件保留。
-- 打包 JAR 冒烟通过：HTTP/3 传输可加载，不可达节点在预算内返回 502，原子替换配置完成 A → B 切换，进程实例不变。构建后可运行 `python scripts/smoke-http3-node-selection.py` 复现。
-- 桌面 Rust 配置测试已接入 GitHub release 工作流；原生编译及这些 Rust 测试的结果以 GitHub 实际执行结果为准，本地未宣称通过。
+基线为手动切换之前的 `ef91d0d`。HTTP CONNECT、SOCKS5 和 HTTP/3 Client 的转发与重连逻辑保持该版本实现。
 
-本地验收日志位于 `.build/node-selection-final.log`、`.build/node-selection-dashboard.log` 和 `.build/node-selection-jar-smoke.log`。P3 的自动切换、熔断和探测不在本次验收范围内。
+- `ClientInvoker` 仅增加稳定 nodeId 和委托 ExchangeClient 的 close 方法；请求超时仍使用旧配置值。
+- `StickyClusterInvoker` 保留 ClusterInvoker 接口及 SPI，CONNECT 选择并绑定，DATA/DISCONNECT 使用原 Invoker。
+- `Http3NodeController` 只管理 `nodeId → ClientInvoker`。配置更新时停用旧选择、发送原流的 DISCONNECT、有界等待确认，再关闭其 ExchangeClient 并创建新节点连接。连接建立失败报告 unavailable，不自动回退节点；已建立连接的重连沿用原 Http3Client。
+- ExchangeHandler 在旧逻辑上仅补充流归属记录及整连接关闭时的清理通知。HeaderExchangeClient.close、pending Future 和浏览器取消 CONNECT 均复用旧逻辑。
+- 删除 DownstreamGate、defer/activate 接口、预算附件、CONNECT 队列、信号量和重复浏览器关闭监听。入口协议不承担节点切换职责。
 
-单连接简化后重新执行完整 Java `verify`，仍为 192 个用例、0 失败、0 错误、3 个条件跳过，包含三种加密套件及独立进程的真实切换链路，10 类生命周期检查各完成 8 次。新增断言拒绝多连接配置，并确认无关负载均衡字段不触发连接重建。Dashboard 29 个测试和两个页面的浏览器冒烟也重新通过。对应日志为 `.build/http3-single-connection-verify.log` 和 `.build/http3-single-connection-dashboard.log`。
+测试覆盖单连接选择、备用编辑不中断、当前参数修改触发重连、非法配置保留旧快照、三套加密、HTTP CONNECT/普通 HTTP/SOCKS5、128 KiB 分片字节比对、独立 Java 进程、旧节点 session 及 Future 回收。生命周期诊断参数为 `-Dhttp3.lifecycle.probe=true -Dhttp3.lifecycle.limit=4 -Dhttp3.lifecycle.cycles=8`。
 
-进一步精简：移除连接 UUID、物理连接代次、绑定诊断元数据和切换代次判断；保留 `StickyClusterInvoker` 的 ClusterInvoker 接口、SPI 及流绑定；当前 HTTP/3 只向其提供所选节点的一个 Invoker。配置应用和建连由同一个协调线程按顺序执行。保留配置监听、旧连接及流的清理、超时取消和浏览器握手前的数据暂存。
+本轮日志：`.build/http3-minimal-verify.log`、`.build/http3-minimal-dashboard.log`；打包冒烟日志为 `.build/node-selection-jar-smoke.log`。桌面原生编译及 Rust 配置测试仍交给 GitHub，页面冒烟只验证真实页面 JavaScript 和配置交互。
 
-这轮精简后完整 Java `verify` 再次通过：192 个用例，0 失败、0 错误、3 个条件跳过，10 类 HTTP/3 生命周期各循环 8 次并完成资源回收，真实三套加密及独立进程切换用例全部通过。日志为 `.build/http3-simplified-verify.log`。
-
-CI 随后发现旧节点 session 回收的关闭时序问题：切换时 DISCONNECT 发出后立即关闭传输，正常浏览器断开又存在重复关闭路径。修复为切换时最多等待 2 秒的 DISCONNECT 确认后关闭传输（超时仍允许切换）；协调器只取消未完成 CONNECT，已建立流由 RelayHandler 断开。新增等待确认的单元测试，并在真实切换测试中要求发布 B 状态时 A 的 session 已清零。修复后本地完整 `verify` 为 193 个用例、0 失败、0 错误、3 个条件跳过。
-
-进一步核查 CI 日志确认：清理时构造的 DISCONNECT 使用空目标地址，在客户端域名限流 Filter 中被拒绝，导致通知没有发到远端。绑定现在保留原目标地址与端口用于构造断开请求；回归测试经过生产实际的客户端 Filter 链，确保断开通知确实发出。没有恢复连接 UUID、代次或诊断元数据。最终回归日志为 `.build/http3-ci-fix-verify.log`。
+本地验收：Java 完整 `verify` 共 192 个用例，189 个通过、3 个原有条件跳过，无失败；10 类生命周期场景各循环 8 次并回到零资源基线。Dashboard 29 个测试全部通过，两个真实页面和新 JAR 冒烟通过。HTTP CONNECT、SOCKS5 Handler、HTTP/3 Client 已逐文件核对，与 `ef91d0d` 内容一致。

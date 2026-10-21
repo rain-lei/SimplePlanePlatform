@@ -22,10 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * </p>
  */
 public interface ExchangeClient {
-    /** Notification for bindings owned by this connection; callback must not block. */
     default void setStreamClosedListener(java.util.function.LongConsumer listener) { }
-    default void deferDownstream(long streamId) { }
-    default void activateDownstream(long streamId) { }
 
     /**
      * 发送请求并等待响应（控制面：CONNECT/DISCONNECT）

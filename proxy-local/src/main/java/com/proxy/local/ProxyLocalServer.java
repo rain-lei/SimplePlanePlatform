@@ -58,13 +58,14 @@ public class ProxyLocalServer {
     private final SystemProxyManager systemProxyManager;
     private Channel serverChannel;
     private com.proxy.local.config.NodeConfigWatcher nodeConfigWatcher;
+    private com.proxy.local.config.Http3NodeController nodeController;
 
     public void watchNodeConfig(java.nio.file.Path path) throws Exception {
-        if (!(clusterInvoker instanceof com.proxy.local.config.Http3NodeController)) {
+        if (nodeController == null) {
             throw new IllegalStateException("Manual HTTP/3 node selection is not enabled");
         }
         nodeConfigWatcher = new com.proxy.local.config.NodeConfigWatcher(path,
-                (com.proxy.local.config.Http3NodeController) clusterInvoker, config);
+                nodeController, config);
     }
 
     public ProxyLocalServer(ProxyConfig config) {
@@ -102,7 +103,8 @@ public class ProxyLocalServer {
      */
     private Invoker buildInvokerChain() {
         if (config.getNodeSelection() != null) {
-            return new com.proxy.local.config.Http3NodeController(config);
+            nodeController = new com.proxy.local.config.Http3NodeController(config);
+            return nodeController.getClusterInvoker();
         }
         // 1. 加载 SPI 组件
         Exchanger exchanger = ExtensionLoader.getLoader(Exchanger.class).getDefaultExtension();
@@ -231,12 +233,12 @@ public class ProxyLocalServer {
         // 3. 关闭 DefaultFuture 时间轮，唤醒所有 pending Future
         // The daemon timer is process-wide, not owned by this server instance.
 
-        if (clusterInvoker instanceof com.proxy.local.config.Http3NodeController) {
-            ((com.proxy.local.config.Http3NodeController) clusterInvoker).close();
+        if (nodeController != null) {
+            nodeController.close();
         }
 
         // 4. 关闭 ClusterInvoker 中的 Invoker（底层会关闭 ExchangeClient → Http2Connection）
-        if (clusterInvoker instanceof ClusterInvoker) {
+        if (nodeController == null && clusterInvoker instanceof ClusterInvoker) {
             List<Invoker> invokers = ((ClusterInvoker) clusterInvoker).getAvailableInvokers();
             for (Invoker inv : invokers) {
                 try {
@@ -300,7 +302,7 @@ public class ProxyLocalServer {
 
         try {
             server.start();
-            if (args.length > 0 && server.clusterInvoker instanceof com.proxy.local.config.Http3NodeController) {
+            if (args.length > 0 && server.nodeController != null) {
                 server.watchNodeConfig(java.nio.file.Paths.get(args[0]));
             }
             server.awaitTermination();

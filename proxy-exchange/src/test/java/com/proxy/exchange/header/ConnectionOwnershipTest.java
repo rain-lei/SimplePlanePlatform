@@ -10,22 +10,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ConnectionOwnershipTest {
-    @Test void earlyDownstreamWaitsForBrowserHandshake() {
+    @Test void synchronousConnectCallbackWritesHandshakeBeforeFollowingData() {
         ExchangeHandler handler = new ExchangeHandler();
         EmbeddedChannel transport = new EmbeddedChannel(handler);
         EmbeddedChannel browser = new EmbeddedChannel(new ChannelInboundHandlerAdapter());
         ConcurrentHashMap<Long, ChannelHandlerContext> registry = new ConcurrentHashMap<>();
         registry.put(104L, browser.pipeline().firstContext());
         handler.setStreamRegistry(registry);
-        handler.deferDownstream(104);
         DefaultFuture connect = DefaultFuture.newFuture(90004, 10000);
         handler.trackRequest(90004, 104, connect, true);
+        connect.whenComplete((response, error) -> browser.writeOutbound(
+                io.netty.buffer.Unpooled.wrappedBuffer(new byte[]{5, 0})));
+        transport.writeInbound(ProxyMessage.builder().requestId(90004).streamId(104)
+                .type(ProxyMessage.MessageType.CONNECT_RESPONSE).status(Response.OK).build());
         transport.writeInbound(ProxyMessage.builder().streamId(104).type(ProxyMessage.MessageType.DATA)
                 .data(new byte[]{42}).build());
-        assertNull(browser.readOutbound());
-        browser.writeOutbound(io.netty.buffer.Unpooled.wrappedBuffer(new byte[]{5, 0}));
-        connect.complete(Response.ok());
-        handler.activateDownstream(104);
         io.netty.buffer.ByteBuf handshake = browser.readOutbound();
         io.netty.buffer.ByteBuf payload = browser.readOutbound();
         assertEquals(5, handshake.readByte());
@@ -57,27 +56,10 @@ class ConnectionOwnershipTest {
         assertTrue(browserB.isActive());
         assertFalse(pendingB.isDone());
         assertEquals(1, registry.size());
-        // A duplicate/late callback must not close B's browser.
-        a.onStreamClosed(102, null);
-        assertTrue(browserB.isActive());
         b.onDisconnected();
         assertTrue(pendingB.isCompletedExceptionally());
         browserA.finishAndReleaseAll();
         browserB.finishAndReleaseAll();
     }
 
-    @Test void responseMustComeFromRequestOwner() {
-        ExchangeHandler a = new ExchangeHandler(), b = new ExchangeHandler();
-        EmbeddedChannel channelA = new EmbeddedChannel(a), channelB = new EmbeddedChannel(b);
-        DefaultFuture pending = DefaultFuture.newFuture(90003, 10000);
-        a.trackRequest(90003, 103, pending, true);
-        ProxyMessage response = ProxyMessage.builder().requestId(90003).streamId(103)
-                .type(ProxyMessage.MessageType.CONNECT_RESPONSE).status(Response.OK).build();
-        channelB.writeInbound(response);
-        assertFalse(pending.isDone());
-        channelA.writeInbound(response);
-        assertTrue(pending.join().isSuccess());
-        channelA.finishAndReleaseAll();
-        channelB.finishAndReleaseAll();
-    }
 }

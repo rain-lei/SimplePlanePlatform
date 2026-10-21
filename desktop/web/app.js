@@ -290,8 +290,6 @@ const App = (function () {
     // 收集服务器卡片
     const cards = $$('.server-card', $('#remoteServers'));
     localConfig.nodes = cards.map(card => {
-      const http3 = { ...card.nodeConfig.http3 };
-      delete http3.serverName; delete http3.caFile; delete http3.certificatePin;
       return {
         ...card.nodeConfig,
         id: card.dataset.nodeId,
@@ -301,8 +299,6 @@ const App = (function () {
         cipher: val($('[data-key="cipher"]', card)),
         key: val($('[data-key="key"]', card)),
         transport: val($('[data-key="transport"]', card)) || 'http3',
-        http3: { ...http3, server_name: val($('[data-key="serverName"]', card)),
-          ca_file: val($('[data-key="caFile"]', card)), certificate_pin: val($('[data-key="certificatePin"]', card)) },
       };
     });
     const selected = cards.find(card => $('[data-key="selected"]', card).checked);
@@ -383,9 +379,6 @@ const App = (function () {
           </select>
         </div>
         <div class="server-field"><label>Key</label><input class="input" value="${escAttr(srv.key || '')}" data-key="key" type="password"></div>
-        <div class="server-field"><label>HTTP/3 证书域名（留空使用 Host）</label><input class="input" value="${escAttr(srv.http3?.server_name || srv.http3?.serverName || '')}" data-key="serverName"></div>
-        <div class="server-field"><label>HTTP/3 CA 路径（留空使用系统信任）</label><input class="input" value="${escAttr(srv.http3?.ca_file ?? srv.http3?.caFile ?? 'http3-remote-ca.crt')}" data-key="caFile"></div>
-        <div class="server-field"><label>HTTP/3 证书公钥指纹（可选）</label><input class="input" value="${escAttr(srv.http3?.certificate_pin || srv.http3?.certificatePin || '')}" data-key="certificatePin"></div>
       </div>`;
     $$('input, select', card).forEach(el => {
       el.addEventListener('input', markChanged);
