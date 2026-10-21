@@ -129,3 +129,22 @@ adb shell /data/local/tmp/simpleplane-network-probe
 运行前确认 VPN 已开启，shell UID 在 VPN 路由范围内；以 FakeDNS 地址和应用日志核对流量路径。
 
 Wi-Fi/移动网络切换、长时间运行和吞吐量尚未验证。
+
+## 上传后的 CI 兼容性修复
+
+提交 `59fbd22` 的 [Actions 运行 39586344463](https://github.com/rain-lei/SimplePlanePlatform/actions/runs/39586344463)
+暴露了与本地构建环境不同的两处问题：
+
+- Android SDK 安装步骤使用 setup-android v3 的默认包列表，包含已经下架的 `tools`，
+  在编译前即报 `Failed to find package 'tools'`。显式指定平台工具、Android 34 和
+  Build Tools 34.0.0，沿用上游已采用的 SDK 包配置。
+- CI 使用当前 stable Rust 和严格的 `-D warnings`，旧 `fetch_update` API 的弃用警告
+  导致构建失败。此前本地 Clippy 的兼容豁免未覆盖这个严格条件。计数器现使用原子
+  compare-exchange 循环，保留归零饱和与并发更新语义，并兼容本机 Rust 1.96.1。
+
+新增计数器归零与并发更新回归测试；路由数据测试改用固定大小的数组分块，消除新版
+Clippy 提示。CI 的严格静态检查扩展到所有目标（包括测试和示例），使用锁定依赖；
+Android 构建同时运行配置单元测试。没有降低警告门禁，也没有关闭失败的工作流。
+
+本地验证：Rust 1.99.1 的 `cargo clippy --locked --all-targets -- -D warnings` 无豁免通过；
+核心测试 90 通过、1 项外网测试默认忽略；Rust 1.96.1 的 Android arm64 release 检查通过。

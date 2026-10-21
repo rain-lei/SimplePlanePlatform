@@ -542,9 +542,10 @@ mod tests {
     #[test]
     fn cn_ipv4_data_is_sorted_and_well_formed() {
         assert!(!CN_IPV4_RANGES.is_empty());
-        assert_eq!(CN_IPV4_RANGES.len() % 8, 0);
+        let (records, remainder) = CN_IPV4_RANGES.as_chunks::<8>();
+        assert!(remainder.is_empty());
         let mut previous_end = None;
-        for record in CN_IPV4_RANGES.chunks_exact(8) {
+        for record in records {
             let start = u32::from_be_bytes(record[0..4].try_into().unwrap());
             let end = u32::from_be_bytes(record[4..8].try_into().unwrap());
             assert!(start <= end);

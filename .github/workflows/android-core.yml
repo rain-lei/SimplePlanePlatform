@@ -67,11 +67,11 @@ jobs:
 
       - name: cargo clippy -D warnings
         working-directory: ${{ env.CRATE_DIR }}
-        run: cargo clippy --lib -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test
         working-directory: ${{ env.CRATE_DIR }}
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
       # 覆盖率：当前为信息性输出，不阻断 CI。
       # TODO(A5)：A5 出站层（crypto/proxy_proto/outbound）落地、整体代码量稳定后，
@@ -106,6 +106,9 @@ jobs:
 
       - name: 安装 Android SDK / 命令行工具
         uses: android-actions/setup-android@v3
+        with:
+          # setup-android's default includes the removed "tools" package.
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
       - name: 安装 Android NDK r26（cargo-ndk 交叉编译需要）
         run: |
@@ -142,9 +145,9 @@ jobs:
 
       # preBuild 已 dependsOn buildRust（见 app/build.gradle.kts），CI 已在上一步手动编过 .so，
       # 这里用 -PskipRustBuild=true 避免 Gradle 再触发一次（也避免环境差异导致重复失败）。
-      - name: 构建 Debug APK（assembleDebug）
+      - name: 构建 Debug APK 并运行配置测试
         working-directory: android-app
-        run: ./gradlew assembleDebug -PskipRustBuild=true --stacktrace
+        run: ./gradlew assembleDebug testDebugUnitTest -PskipRustBuild=true --stacktrace
 
       - name: 上传 Debug APK artifact
         uses: actions/upload-artifact@v4

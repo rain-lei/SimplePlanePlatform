@@ -41,9 +41,20 @@ impl CoreStats {
     }
 
     pub fn end_connection(&self) {
-        self.active_connections
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
-            .ok();
+        // Keep the saturating update compatible with older Android build
+        // toolchains and newer Rust versions that deprecate fetch_update.
+        let mut current = self.active_connections.load(Ordering::Relaxed);
+        while current > 0 {
+            match self.active_connections.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn inc_proxy(&self) {
@@ -113,5 +124,47 @@ impl CoreStats {
             "last_error": last_error,
         })
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn end_connection_saturates_at_zero() {
+        let stats = CoreStats::new();
+        stats.end_connection();
+        stats.begin_connection();
+        stats.end_connection();
+        stats.end_connection();
+        let snapshot: serde_json::Value = serde_json::from_str(&stats.snapshot_json()).unwrap();
+        assert_eq!(snapshot["active_connections"], 0);
+        assert_eq!(snapshot["total_connections"], 1);
+    }
+
+    #[test]
+    fn concurrent_connection_updates_preserve_counts() {
+        let stats = CoreStats::new();
+        let barrier = Barrier::new(8);
+        stats.begin_connection();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..1000 {
+                        stats.begin_connection();
+                        stats.end_connection();
+                    }
+                });
+            }
+        });
+        let snapshot: serde_json::Value = serde_json::from_str(&stats.snapshot_json()).unwrap();
+        assert_eq!(snapshot["active_connections"], 1);
+        assert_eq!(snapshot["total_connections"], 8001);
+        stats.end_connection();
+        let snapshot: serde_json::Value = serde_json::from_str(&stats.snapshot_json()).unwrap();
+        assert_eq!(snapshot["active_connections"], 0);
     }
 }
