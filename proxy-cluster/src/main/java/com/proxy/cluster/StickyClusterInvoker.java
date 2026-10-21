@@ -21,8 +21,14 @@ public final class StickyClusterInvoker implements ClusterInvoker {
 
     private static final class Binding {
         final Invoker invoker;
+        final String targetHost;
+        final int targetPort;
         volatile boolean active;
-        Binding(Invoker invoker) { this.invoker = invoker; }
+        Binding(Invoker invoker, Invocation connect) {
+            this.invoker = invoker;
+            this.targetHost = connect.getTargetHost();
+            this.targetPort = connect.getTargetPort();
+        }
     }
 
     @Override
@@ -38,7 +44,7 @@ public final class StickyClusterInvoker implements ClusterInvoker {
             if (available.isEmpty()) return error("No available invoker");
             Invoker selected = loadBalance == null ? available.get(0)
                     : loadBalance.select(available, invocation, Collections.emptySet());
-            Binding binding = new Binding(selected);
+            Binding binding = new Binding(selected, invocation);
             if (bindings.putIfAbsent(streamId, binding) != null) return error("Stream already bound");
             CompletableFuture<Response> result;
             try {
@@ -82,7 +88,8 @@ public final class StickyClusterInvoker implements ClusterInvoker {
         bindings.forEach((streamId, binding) -> {
             if (!bindings.remove(streamId, binding)) return;
             binding.active = false;
-            Invocation disconnect = new Invocation(null, 0, null, ProxyMessage.MessageType.DISCONNECT);
+            Invocation disconnect = new Invocation(binding.targetHost, binding.targetPort, null,
+                    ProxyMessage.MessageType.DISCONNECT);
             disconnect.setAttachment("streamId", streamId);
             try { disconnects.add(binding.invoker.invoke(disconnect)); }
             catch (RuntimeException ignored) { /* Transport closure remains the final cleanup boundary. */ }

@@ -116,3 +116,5 @@ python scripts/test-node-selection-ui.py
 这轮精简后完整 Java `verify` 再次通过：192 个用例，0 失败、0 错误、3 个条件跳过，10 类 HTTP/3 生命周期各循环 8 次并完成资源回收，真实三套加密及独立进程切换用例全部通过。日志为 `.build/http3-simplified-verify.log`。
 
 CI 随后发现旧节点 session 回收的关闭时序问题：切换时 DISCONNECT 发出后立即关闭传输，正常浏览器断开又存在重复关闭路径。修复为切换时最多等待 2 秒的 DISCONNECT 确认后关闭传输（超时仍允许切换）；协调器只取消未完成 CONNECT，已建立流由 RelayHandler 断开。新增等待确认的单元测试，并在真实切换测试中要求发布 B 状态时 A 的 session 已清零。修复后本地完整 `verify` 为 193 个用例、0 失败、0 错误、3 个条件跳过。
+
+进一步核查 CI 日志确认：清理时构造的 DISCONNECT 使用空目标地址，在客户端域名限流 Filter 中被拒绝，导致通知没有发到远端。绑定现在保留原目标地址与端口用于构造断开请求；回归测试经过生产实际的客户端 Filter 链，确保断开通知确实发出。没有恢复连接 UUID、代次或诊断元数据。最终回归日志为 `.build/http3-ci-fix-verify.log`。

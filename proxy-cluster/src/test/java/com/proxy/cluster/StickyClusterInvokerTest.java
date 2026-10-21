@@ -1,9 +1,12 @@
 package com.proxy.cluster;
 
 import com.proxy.common.filter.Invocation;
+import com.proxy.common.filter.Filter;
+import com.proxy.common.filter.FilterChainBuilder;
 import com.proxy.common.filter.Invoker;
 import com.proxy.common.filter.Response;
 import com.proxy.common.model.ProxyMessage.MessageType;
+import com.proxy.common.spi.ExtensionLoader;
 import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.Collections;
@@ -100,13 +103,16 @@ class StickyClusterInvokerTest {
         assertEquals(2, a.calls);
     }
 
-    @Test void retirementWaitsForRemoteDisconnectAcknowledgement() {
+    @Test void retirementTraversesClientFiltersAndWaitsForDisconnectAcknowledgement() {
         StickyClusterInvoker cluster = new StickyClusterInvoker();
         Connection connection = new Connection();
         connection.disconnect = new CompletableFuture<>();
-        cluster.setInvokers(Collections.singletonList(connection));
+        FilterChainBuilder builder = ExtensionLoader.getLoader(FilterChainBuilder.class).getDefaultExtension();
+        cluster.setInvokers(Collections.singletonList(builder.build(connection,
+                ExtensionLoader.getLoader(Filter.class).getActivateExtensions("client"))));
         cluster.invoke(message(1, MessageType.CONNECT)).join();
         CompletableFuture<Void> retiring = cluster.retireBindings();
+        assertEquals(2, connection.calls, "DISCONNECT must pass the real client filters");
         assertEquals(0, cluster.getBindingCount());
         assertFalse(retiring.isDone());
         connection.disconnect.complete(Response.ok());
