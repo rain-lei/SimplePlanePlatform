@@ -392,9 +392,8 @@ public class ProxyConfig {
             if (!ids.contains(nodeSelection.getSelectedNodeId())) {
                 throw new IllegalArgumentException("Selected node ID does not exist");
             }
-            if (connectionsPerNode < 1 || connectionsPerNode > 16) throw new IllegalArgumentException("connectionsPerNode must be between 1 and 16");
+            if (connectionsPerNode != 1) throw new IllegalArgumentException("HTTP/3 requires connectionsPerNode=1");
             if (timeoutMs < 1 || timeoutMs > 120000) throw new IllegalArgumentException("timeoutMs must be between 1 and 120000");
-            com.proxy.common.spi.ExtensionLoader.getLoader(com.proxy.common.cluster.LoadBalance.class).getExtension(loadBalance);
         }
         if (nodeSelection == null && http3Nodes > 0 && (remoteServers.size() != 1 || connectionsPerNode != 1)) {
             throw new IllegalArgumentException("HTTP/3 V1 requires exactly one remote server and connectionsPerNode=1");

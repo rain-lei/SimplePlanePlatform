@@ -7,11 +7,12 @@ const { validateManualNodes, atomicWrite, readNodeStatus, withNodeBypass, prepar
 const { parseYaml, toYaml } = require('../yaml');
 
 test('manual nodes preserve identity, selection and transport options through YAML', () => {
-  const config = { remoteServers: [
+  const config = { connectionsPerNode: 1, remoteServers: [
     { id: 'a', name: '主节点', host: 'a.example', port: 9090, transport: 'http3', cipherKey: 'key', http3: { serverName: 'a.example' } },
     { id: 'b', host: 'b.example', port: 9091, transport: 'http3' },
   ], nodeSelection: { mode: 'manual', selectedNodeId: 'b' } };
   validateManualNodes(config);
+  assert.throws(() => validateManualNodes({ ...config, connectionsPerNode: 2 }));
   assert.deepEqual(parseYaml(toYaml(config)), config);
   assert.throws(() => validateManualNodes({ ...config, nodeSelection: { mode: 'manual', selectedNodeId: 'missing' } }));
   assert.throws(() => validateManualNodes({ ...config, remoteServers: [config.remoteServers[0], config.remoteServers[0]] }));

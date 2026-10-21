@@ -592,6 +592,7 @@ const App = (function () {
     if (localConfig) {
       localConfig.remoteServers = servers;
       if (servers.length && servers.every(node => node.transport === 'http3')) {
+        localConfig.connectionsPerNode = 1;
         const selected = $$('.server-card', $('#remoteServers')).find(card => $('[data-key="selected"]', card).checked);
         localConfig.nodeSelection = { mode: 'manual', selectedNodeId: selected?.dataset.nodeId || '' };
         $('#cluster').closest('.field-group').hidden = true;

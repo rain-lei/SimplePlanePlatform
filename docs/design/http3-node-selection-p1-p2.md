@@ -2,6 +2,8 @@
 
 本文对应 [改造方案](node-selection-and-failover-plan.md) 的 P1、P2。范围是 Java local 的 HTTP/3 代理链路、Web Dashboard 与桌面端；HTTP/2 继续沿用原有选择逻辑。自动故障切换、节点熔断与恢复探测属于 P3。
 
+HTTP/3 每个节点固定一条 QUIC 连接，配置要求 `connectionsPerNode: 1`。仅按需连接当前所选节点，不预建备用节点连接；节点内部不再进行连接池管理或负载均衡。
+
 ## 使用
 
 Dashboard 或桌面端可以添加多个 HTTP/3 节点，在节点卡片上勾选“使用此节点”，然后保存。切换会关闭原节点的代理流及客户端连接，应用需要刷新或重连；直连流保持不变。
@@ -57,7 +59,7 @@ Dashboard、桌面端和仓库启动脚本会传入配置路径。无参数启�
 - CONNECT 选择具体 Invoker；DATA、DISCONNECT 仅使用原绑定，不重新负载均衡，也不重放 DATA。
 - 绑定记录 stream、节点、具体连接标识及物理连接代次。父连接断开只失败所属请求和流；重连使用新代次，旧流不能接续。
 - 手动模式不会使用备用节点兜底。所选节点暂时不可达仍可应用选择，面板显示等待建连或节点不可用，实际建流失败会返回错误。
-- 改变所选节点、当前节点连接参数或连接分配参数会释放旧资源；仅更改备用节点或名称，不关闭当前健康流。
+- 改变所选节点、当前节点连接参数或建流超时会释放旧资源；仅更改备用节点、名称或不参与 HTTP/3 选择的负载均衡字段，不关闭当前健康流。
 - CONNECT 在协调线程中建立传输，最多容纳 128 个待完成建流请求。排队、传输握手和控制请求共享建流预算；取消后不再后台建流。
 - 入口 HTTP CONNECT、SOCKS5 成功响应入队后才放行早到的下行数据。早到下行最多缓存 1 MiB/1024 帧，入口建流阶段缓存同样有大小限制。
 - 本次没有加入自动重试策略、熔断或主动探测；单次建流失败向应用报错，由应用重连。
@@ -106,3 +108,5 @@ python scripts/test-node-selection-ui.py
 - 桌面 Rust 配置测试已接入 GitHub release 工作流；原生编译及这些 Rust 测试的结果以 GitHub 实际执行结果为准，本地未宣称通过。
 
 本地验收日志位于 `.build/node-selection-final.log`、`.build/node-selection-dashboard.log` 和 `.build/node-selection-jar-smoke.log`。P3 的自动切换、熔断和探测不在本次验收范围内。
+
+单连接简化后重新执行完整 Java `verify`，仍为 192 个用例、0 失败、0 错误、3 个条件跳过，包含三种加密套件及独立进程的真实切换链路，10 类生命周期检查各完成 8 次。新增断言拒绝多连接配置，并确认无关负载均衡字段不触发连接重建。Dashboard 29 个测试和两个页面的浏览器冒烟也重新通过。对应日志为 `.build/http3-single-connection-verify.log` 和 `.build/http3-single-connection-dashboard.log`。

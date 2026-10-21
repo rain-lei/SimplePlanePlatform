@@ -38,6 +38,9 @@ class NodeSelectionConfigTest {
     }
 
     @Test void invalidConnectionParametersAreRejectedBeforeSwitching() {
+        ProxyConfig multipleConnections = config("a");
+        multipleConnections.setConnectionsPerNode(2);
+        assertThrows(IllegalArgumentException.class, multipleConnections::validate);
         ProxyConfig invalid = config("a");
         invalid.getRemoteServers().get(1).getHttp3().setHandshakeTimeoutMs(-1);
         assertThrows(IllegalArgumentException.class, invalid::validate);
@@ -62,6 +65,7 @@ class NodeSelectionConfigTest {
         try {
             ProxyConfig backupChanged = config("a");
             backupChanged.getRemoteServers().get(1).setPort(9191);
+            backupChanged.setLoadBalance("unused-for-single-http3-connection");
             controller.apply(backupChanged).get(2, TimeUnit.SECONDS);
             assertEquals(0, controller.getGeneration());
             controller.apply(config("b")).get(2, TimeUnit.SECONDS);

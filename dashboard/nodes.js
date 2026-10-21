@@ -6,6 +6,7 @@ function validateManualNodes(config) {
   if (!Array.isArray(nodes) || !nodes.length) throw new Error('至少需要配置一个节点');
   if (!config.nodeSelection) return;
   if (config.nodeSelection.mode !== 'manual') throw new Error('当前版本仅支持手动节点选择');
+  if (config.connectionsPerNode !== 1) throw new Error('HTTP/3 每个节点只支持一条连接，请设置 connectionsPerNode=1');
   if (!nodes.length || nodes.some(node => node.transport !== 'http3')) throw new Error('手动节点选择仅支持 HTTP/3 节点');
   const ids = new Set();
   for (const node of nodes) {

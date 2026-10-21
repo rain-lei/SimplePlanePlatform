@@ -2,7 +2,6 @@ package com.proxy.local.config;
 
 import com.proxy.cluster.ClientInvoker;
 import com.proxy.cluster.StickyClusterInvoker;
-import com.proxy.common.cluster.LoadBalance;
 import com.proxy.common.exchange.ExchangeClient;
 import com.proxy.common.exchange.Exchanger;
 import com.proxy.common.filter.Filter;
@@ -15,7 +14,6 @@ import com.proxy.common.model.URL;
 import com.proxy.common.spi.ExtensionLoader;
 import com.proxy.local.handler.StreamChannelRegistry;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -32,7 +30,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         thread.setDaemon(true);
         return thread;
     });
-    private final List<ExchangeClient> clients = new ArrayList<>();
+    private ExchangeClient client;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final java.util.concurrent.Semaphore pendingConnects = new java.util.concurrent.Semaphore(128);
     private volatile ProxyConfig snapshot;
@@ -61,7 +59,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
                 generation++;
                 sticky.setInvokers(Collections.emptyList());
                 sticky.retireBindings();
-                closeClients();
+                closeClient();
                 nodeStatus = "idle";
             }
             snapshot = next;
@@ -76,8 +74,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
                 .orElseThrow(() -> new IllegalArgumentException("Selected node missing"));
         return java.util.Arrays.asList(selected.getId(), selected.getHost(), selected.getPort(),
                 selected.getTransport(), selected.isSsl(), selected.getCipher(), selected.getCipherKey(),
-                new org.yaml.snakeyaml.Yaml().dump(selected.getHttp3()), config.getConnectionsPerNode(),
-                config.getTimeoutMs(), config.getLoadBalance());
+                new org.yaml.snakeyaml.Yaml().dump(selected.getHttp3()), config.getTimeoutMs());
     }
 
     @Override
@@ -99,7 +96,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
             sticky.unbind(streamId);
             try {
                 coordinator.execute(() -> {
-                    for (ExchangeClient client : clients) client.getClient().closeStream(streamId);
+                    if (client != null) client.getClient().closeStream(streamId);
                 });
             } catch (java.util.concurrent.RejectedExecutionException stopped) { /* close() owns resource cleanup */ }
         });
@@ -110,7 +107,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
                 result.complete(Response.error("Node selection changed or CONNECT budget expired"));
                 return;
             }
-            if (clients.isEmpty()) createSelectedConnections(started + TimeUnit.MILLISECONDS.toNanos(snapshot.getTimeoutMs()));
+            if (client == null) createSelectedConnection(started + TimeUnit.MILLISECONDS.toNanos(snapshot.getTimeoutMs()));
             if (result.isDone()) return;
             long remaining = snapshot.getTimeoutMs() - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
             if (remaining <= 0) {
@@ -131,7 +128,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         return result;
     }
 
-    private void createSelectedConnections(long deadline) {
+    private void createSelectedConnection(long deadline) {
         nodeStatus = "connecting";
         ProxyConfig config = snapshot;
         ProxyConfig.RemoteServer selected = config.getRemoteServers().stream()
@@ -140,30 +137,25 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         Exchanger exchanger = ExtensionLoader.getLoader(Exchanger.class).getDefaultExtension();
         FilterChainBuilder builder = ExtensionLoader.getLoader(FilterChainBuilder.class).getDefaultExtension();
         List<Filter> filters = ExtensionLoader.getLoader(Filter.class).getActivateExtensions("client");
-        List<Invoker> invokers = new ArrayList<>();
         try {
-            for (int i = 0; i < config.getConnectionsPerNode(); i++) {
-                long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
-                if (remaining <= 0) throw new IllegalStateException("CONNECT budget expired during connection creation");
-                URL url = new URL("proxy", selected.getHost(), selected.getPort())
-                        .addParameter("transport", "http3")
-                        .addParameter("ssl", String.valueOf(selected.isSsl()))
-                        .addParameter("cipher", selected.getCipher())
-                        .addParameter("cipherKey", selected.getCipherKey());
-                selected.getHttp3().toUrlParameters(url);
-                url.addParameter("http3.handshakeTimeoutMs", Math.min(remaining, selected.getHttp3().getHandshakeTimeoutMs()));
-                ExchangeClient client = exchanger.connect(url);
-                clients.add(client);
-                client.setStreamRegistry(StreamChannelRegistry.getInstance().getInternalMap());
-                client.setStreamClosedListener(sticky::unbind);
-                invokers.add(builder.build(new ClientInvoker(client, config.getTimeoutMs()), filters));
-            }
-            sticky.setLoadBalance(ExtensionLoader.getLoader(LoadBalance.class).getExtension(config.getLoadBalance()));
-            sticky.setInvokers(invokers);
+            long remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            if (remaining <= 0) throw new IllegalStateException("CONNECT budget expired during connection creation");
+            URL url = new URL("proxy", selected.getHost(), selected.getPort())
+                    .addParameter("transport", "http3")
+                    .addParameter("ssl", String.valueOf(selected.isSsl()))
+                    .addParameter("cipher", selected.getCipher())
+                    .addParameter("cipherKey", selected.getCipherKey());
+            selected.getHttp3().toUrlParameters(url);
+            url.addParameter("http3.handshakeTimeoutMs", Math.min(remaining, selected.getHttp3().getHandshakeTimeoutMs()));
+            client = exchanger.connect(url);
+            client.setStreamRegistry(StreamChannelRegistry.getInstance().getInternalMap());
+            client.setStreamClosedListener(sticky::unbind);
+            sticky.setInvokers(Collections.singletonList(
+                    builder.build(new ClientInvoker(client, config.getTimeoutMs()), filters)));
             nodeStatus = "available";
         } catch (RuntimeException failure) {
             nodeStatus = "unavailable";
-            closeClients();
+            closeClient();
             throw failure;
         }
     }
@@ -181,9 +173,10 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
         }
     }
 
-    private void closeClients() {
-        for (ExchangeClient client : clients) client.close();
-        clients.clear();
+    private void closeClient() {
+        ExchangeClient previous = client;
+        client = null;
+        if (previous != null) previous.close();
     }
 
     @Override public boolean isAvailable() { return !closed.get(); }
@@ -196,7 +189,7 @@ public final class Http3NodeController implements Invoker, AutoCloseable {
                 generation++;
                 sticky.setInvokers(Collections.emptyList());
                 sticky.retireBindings();
-                closeClients();
+                closeClient();
             });
             coordinator.shutdown();
             try {
