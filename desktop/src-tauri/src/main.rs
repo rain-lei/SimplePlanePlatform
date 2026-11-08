@@ -48,12 +48,20 @@ fn main() {
             commands::diagnose_tun,
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let app = window.app_handle().clone();
                 let state = window.state::<Arc<Mutex<AppState>>>();
                 let state_clone = state.inner().clone();
                 tauri::async_runtime::spawn(async move {
                     let mut s = state_clone.lock().await;
-                    s.cleanup().await;
+                    match s.cleanup().await {
+                        Ok(()) => app.exit(0),
+                        Err(error) => {
+                            log::error!("Application cleanup failed: {}", error);
+                            s.log_manager.lock().await.push("error", "proxy", &format!("恢复网络失败，应用保持打开：{error}"));
+                        }
+                    }
                 });
             }
         })

@@ -74,8 +74,11 @@ impl Default for AppState {
 
 impl AppState {
     /// 退出时清理所有子进程和系统代理设置
-    pub async fn cleanup(&mut self) {
+    pub async fn cleanup(&mut self) -> Result<(), String> {
         log::info!("Cleaning up: stopping all processes and restoring proxy settings");
+
+        // Keep the listener alive if restoring the previous network state fails.
+        crate::proxy::restore_system_proxy(self).await?;
 
         // 停止代理进程（外部进程不管）
         if !self.proxy_external {
@@ -95,13 +98,9 @@ impl AppState {
         self.tun_process = None;
         self.tun_status = ServiceStatus::Stopped;
 
-        // 还原系统代理
-        if self.original_proxy_state.is_some() {
-            let _ = crate::proxy::restore_system_proxy(self).await;
-        }
-
         // DNS 兜底恢复（等待 tun-adapter 的 Drop handler 完成）
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         crate::dns::restore_dns_if_needed();
+        Ok(())
     }
 }
